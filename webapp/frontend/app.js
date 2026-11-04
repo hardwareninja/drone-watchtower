@@ -74,6 +74,7 @@ function onRemoteId(evt) {
   const s = sess("rid:" + evt.session, mode);
   s.count++;
   s.lastTime = evt.time;
+  s.model = evt.model || s.model;
   s.selfid = evt.selfid;
   s.opLat = evt.op_lat; s.opLon = evt.op_lon;
   s.pos = { lat: evt.lat, lon: evt.lon, alt: evt.alt, speed: evt.speed, status: evt.status };
@@ -167,13 +168,14 @@ function renderSidebar() {
     if (dj) badges += '<span class="tag">DroneID</span>';
     if (e.djiids[0] && e.djiids[0].mode === "replay") badges += ' <span class="tag tag-replay">replay</span>';
     const ident = rid ? rid.key.slice(4) : dj.key.slice(6);
+    const model = rid ? (rid.model || "DJI Drone") : "DJI Drone (OcuSync)";
     const metaParts = [];
     if (rid) metaParts.push(`RID ${rid.count} fixes`);
     if (dj) metaParts.push(`DroneID ${dj.count} pkts (${dj.infp} INFP / ${dj.cryp} CRYP)`);
     const lastIso = rid && (!dj || tsec(rid.lastTime) > tsec(dj.lastTime)) ? rid.lastTime : dj.lastTime;
     metaParts.push(`last ${fmtTime(lastIso)}`);
     div.innerHTML = `
-      <div class="row1"><span class="model">DJI ${rid ? "Avata 2" : "Drone (OcuSync)"}</span><span>${badges}</span></div>
+      <div class="row1"><span class="model">${model}</span><span>${badges}</span></div>
       <code>${ident}</code>
       <div class="meta">${metaParts.join(" · ")}</div>`;
     div.onclick = () => { selectedKey = id; renderSidebar(); renderInfo(); };
@@ -321,8 +323,9 @@ function renderHistoryList() {
     let badges = "";
     if (rid) badges += '<span class="tag tag-rid">RemoteID</span> ';
     if (dj) badges += '<span class="tag">DroneID</span>';
+    const model = h.model || (rid ? "DJI Drone" : "DJI Drone (OcuSync)");
     div.innerHTML = `
-      <div class="row1"><span class="model">${rid ? "DJI Avata 2" : "DJI Drone (OcuSync)"}</span><span>${badges}</span></div>
+      <div class="row1"><span class="model">${model}</span><span>${badges}</span></div>
       <code>${h.session}</code>
       <div class="meta"><b>${h.n}</b> events · ${h.first ? h.first.slice(11, 19) : "?"} → ${h.last ? h.last.slice(11, 19) : "?"} UTC</div>`;
     div.onclick = () => { selectedHistory = h.session; renderHistoryList(); showHistoryDetail(h); };
@@ -335,7 +338,7 @@ async function showHistoryDetail(h) {
   $("info-empty").classList.add("hidden");
   $("info-body").classList.remove("hidden");
   const rid = (h.sources || "").includes("remoteid");
-  $("i-model").textContent = rid ? "DJI Avata 2 (history)" : "DJI Drone (history)";
+  $("i-model").textContent = (h.model || (rid ? "DJI Drone" : "DJI Drone")) + " (history)";
   $("i-marker").textContent = "History";
   const kv = [
     ["Identifier", `<code>${h.session}</code>`],

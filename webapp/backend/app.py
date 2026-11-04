@@ -136,6 +136,10 @@ def broadcast(msg: dict) -> None:
 def publish_event(evt: dict) -> None:
     with lock:
         state["events"] += 1
+    if evt.get("source") == "remoteid":
+        model = CONFIG.get("aircraft", {}).get(evt.get("session"))
+        if model:
+            evt["model"] = model
     insert_event(evt)
     typ = "remoteid" if evt.get("source") == "remoteid" else "detection"
     broadcast({"type": typ, "event": evt})
@@ -250,7 +254,40 @@ def history_sessions(limit: int = 100) -> list:
                FROM events GROUP BY session ORDER BY last DESC LIMIT ?""",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+
+    def span(r):
+        return (datetime.datetime.fromisoformat(r["first"]),
+                datetime.datetime.fromisoformat(r["last"]))
+
+    # registry lookup for RemoteID sessions
+    aircraft = CONFIG.get("aircraft", {})
+    rid_rows = []
+    for r in result:
+        if "remoteid" in (r.get("sources") or ""):
+            rid_rows.append(r)
+            m = aircraft.get(r["session"])
+            if m:
+                r["model"] = m
+    # propagate model to DroneID sessions active at the same time
+    for r in result:
+        if r.get("model") or r in rid_rows:
+            continue
+        try:
+            a, b = span(r)
+        except (KeyError, ValueError):
+            continue
+        for q in rid_rows:
+            if "model" not in q:
+                continue
+            try:
+                c1, c2 = span(q)
+            except (KeyError, ValueError):
+                continue
+            if a <= c2 and c1 <= b:
+                r["model"] = q["model"]
+                break
+    return result
 
 
 @app.get("/api/history/events")
