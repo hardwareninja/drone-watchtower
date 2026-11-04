@@ -18,3 +18,4 @@ known_hosts
 *.cf32
 *.cfile
 *.raw
+third_party/*/
