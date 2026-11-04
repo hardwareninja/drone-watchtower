@@ -99,6 +99,29 @@ ssh drone@192.168.50.185 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
 - **Scanner**: LNA 32 / VGA 24, 5.8G raster 5756.5/5776.5/5796.5/5816.5 MHz
 - **Drone behavior**: Avata 2 session hash changes per power cycle; RID positions zero until GPS fix (test outdoors)
 
+## Build a standalone sensor on a new Raspberry Pi
+
+**Recommended hardware:** Raspberry Pi 5, 8 GB, active cooler · 32 GB+ SD (or SSD boot) · powered USB hub. Pi 4 works but the scanner's ZC correlation is CPU-hungry — expect laggy dwell processing.
+
+**Steps:**
+1. Flash **Raspberry Pi OS Bookworm 64-bit** (or Kali ARM64) with Imager — enable SSH, set hostname `watchtower`
+2. Boot, `ssh` in, `sudo apt update && sudo apt full-upgrade`
+3. Get the repo onto the Pi: `git clone <your-repo>` (or `scp -r ~/Projects/drone-watchtower pi@watchtower:~`)
+4. Plug the radios into a **powered hub** → Pi (HackRF, WiFi dongle, Sonoff)
+5. Run the installer:
+   ```bash
+   sudo bash scripts/deploy/raspi-install.sh
+   ```
+   It installs: HackRF + GNU Radio stack, turbofec (NEON build) + turbo adapter, luyii scanner, bkerler WiFi/BLE receivers, the webapp to `/opt/watchtower-web`, and all five systemd services.
+6. Set your station location + aircraft registry: `sudo nano /opt/watchtower-web/backend/config.json` → `systemctl restart watchtower-web`
+7. Open `http://<pi-ip>:8080` from any device on the LAN — arm the drone, Start Scan
+
+**Pi-specific notes:**
+- The BLE service auto-starts only if `/dev/ttyUSB0` exists; if the Sonoff is new/unflashed, flash Sniffle first (see [Kismet's Sniffle guide](https://www.kismetwireless.net/docs/readme/datasources/bluetooth-sniffle-ble/): `cc2538-bsl -p /dev/ttyUSB0 --bootloader-sonoff-usb -ewv sniffle_cc1352p1_cc2652p1.hex`)
+- History DB lives at `/opt/watchtower-web/data/` — back it up before reflashing
+- For field use: phone/laptop just needs a browser; the Pi is the whole C2
+- USB power discipline matters more than on a VM — a brownout resets all three radios (the 5-min refresh timer recovers the WiFi one automatically)
+
 ## The O4 chain (reference)
 
 ```
