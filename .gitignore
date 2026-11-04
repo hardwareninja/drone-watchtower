@@ -1,0 +1,20 @@
+# IQ captures (multi-GB files)
+captures/*
+!captures/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Secrets — never commit credentials or keys
+.env
+*.key
+known_hosts
+
+# SDR artifacts
+*.cs8
+*.cf32
+*.cfile
+*.raw

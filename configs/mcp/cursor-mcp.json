@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "kali-security": {
+      "command": "ssh",
+      "args": [
+        "-T",
+        "drone@192.168.50.185",
+        "python3 /opt/kali-mcp/server.py"
+      ]
+    },
+    "hexstrike-ai": {
+      "command": "ssh",
+      "args": [
+        "-T",
+        "drone@192.168.50.185",
+        "/opt/hexstrike-ai/hexstrike-env/bin/python3 /opt/hexstrike-ai/hexstrike_mcp.py --server http://localhost:8888"
+      ]
+    }
+  }
+}

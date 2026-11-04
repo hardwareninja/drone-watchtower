@@ -1,0 +1,11 @@
+# Drone Watchtower — analysis/pipeline environment (Mac, Python 3.11+)
+numpy
+scipy
+matplotlib
+pandas
+pyzmq          # pipeline messaging between decoders and services
+pynmea2        # NMEA/GNSS parsing helpers
+cryptography   # AES/CTR experiments for O4 INFP research
+gmssl          # SM2/SM3 for O4 CRYP research (pure-python fallback)
+scapy          # 802.11/WiFi Remote ID capture parsing
+rich           # console output formatting for CLI decoders
