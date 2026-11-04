@@ -29,6 +29,7 @@ except ImportError:
 REMOTEID_ZMQ = ["tcp://127.0.0.1:4223", "tcp://127.0.0.1:4222", "tcp://127.0.0.1:4225"]  # wifi / ble / dji-beacon
 
 BASE = Path(__file__).resolve().parent
+BUILD = str(int(BASE.joinpath("app.py").stat().st_mtime))
 FRONTEND = BASE.parent / "frontend"
 RESULTS = Path("/home/drone/droneid-results")
 ARCHIVE_SESSION = RESULTS / "live-162835" / "detections.jsonl"
@@ -93,6 +94,7 @@ def status_dict() -> dict:
         "started": state["started"],
         "station": CONFIG["station"],
         "archive_available": ARCHIVE_SESSION.exists(),
+        "build": BUILD,
     }
 
 

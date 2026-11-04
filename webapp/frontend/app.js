@@ -1,14 +1,18 @@
-/* Drone Watchtower — live detection frontend */
+/* Drone Watchtower — live detection frontend
+ * Aircraft-centric view: one entry per drone, merging RemoteID (beacon/BLE)
+ * and DroneID (OcuSync) sessions by concurrent activity.
+ */
 const $ = (id) => document.getElementById(id);
-let map, stationMarker, activityRing;
+let map, stationMarker, activityRing, dotLayer;
 let station = null;
-let selectedSession = null;
-let latestDetections = [];
-
-const sessions = new Map(); // hash -> {count, infp, cryp, lastTime, bestRssi, channels: Map, packets: []}
+let statusMode = null;
+const sessions = new Map(); // "rid:<serial>" | "djiid:<hash>" -> session
 
 function fmtTime(iso) {
   return iso ? iso.slice(11, 23) : "--";
+}
+function tsec(iso) {
+  return Date.parse(iso.endsWith("+00:00") ? iso.replace("+00:00", "Z") : iso) || 0;
 }
 
 function connect() {
@@ -23,115 +27,157 @@ function connect() {
 }
 
 function setStatus(st) {
+  // self-update: reload this tab when a newer build is deployed
+  if (st.build) {
+    const prev = localStorage.getItem("wt-build");
+    if (prev && prev !== st.build) {
+      localStorage.setItem("wt-build", st.build);
+      location.reload();
+      return;
+    }
+    localStorage.setItem("wt-build", st.build);
+  }
+  const wasReplay = statusMode === "replay";
+  statusMode = st.mode || null;
+  if (wasReplay && statusMode !== "replay") {
+    // replay finished: clear replayed data, return to live view
+    for (const [k, s] of [...sessions]) if (s.mode === "replay") sessions.delete(k);
+    renderAll();
+  }
   station = st.station;
   const pill = $("status-pill");
-  pill.textContent = st.running ? `${st.mode} · ${st.events} pkts` : "idle";
-  pill.className = "pill " + (st.running ? (st.mode === "live" ? "live" : "ok") : "");
+  pill.textContent = st.running
+    ? (st.mode === "replay" ? "REPLAY · " : "live · ") + st.events + " pkts"
+    : "idle";
+  pill.className = "pill " + (st.running ? (st.mode === "replay" ? "ok" : "live") : "");
   $("btn-scan").textContent = st.running && st.mode === "live" ? "Stop Scan" : "Start Scan";
   $("btn-replay").disabled = st.running;
   $("btn-scan").disabled = st.running && st.mode === "replay";
   if (map && station && !stationMarker) placeStation();
 }
 
+function sess(key, mode) {
+  if (!sessions.has(key)) {
+    sessions.set(key, {
+      key, mode, source: key.startsWith("rid:") ? "remoteid" : "droneid",
+      count: 0, infp: 0, cryp: 0, lastTime: null, bestRssi: -999,
+      channels: new Map(), packets: [], trail: [],
+    });
+  }
+  const s = sessions.get(key);
+  if (s.mode !== mode && mode) s.mode = mode;
+  return s;
+}
+
 function onRemoteId(evt) {
-  const s = sessions.get(evt.session) || {
-    source: "remoteid", count: 0, infp: 0, cryp: 0, lastTime: null,
-    bestRssi: 0, channels: new Map(), packets: [], trail: [],
-  };
+  const mode = evt.mode || (statusMode === "replay" ? "replay" : "live");
+  const s = sess("rid:" + evt.session, mode);
   s.count++;
-  s.source = "remoteid";
   s.lastTime = evt.time;
   s.selfid = evt.selfid;
-  s.opLat = evt.op_lat;
-  s.opLon = evt.op_lon;
+  s.opLat = evt.op_lat; s.opLon = evt.op_lon;
   s.pos = { lat: evt.lat, lon: evt.lon, alt: evt.alt, speed: evt.speed, status: evt.status };
   s.trail.push([evt.lat, evt.lon]);
   if (s.trail.length > 300) s.trail.shift();
-  s.packets.unshift({ time: evt.time, freq: 2437, marker: "RemoteID", rssi: 0, lat: evt.lat, lon: evt.lon });
+  s.packets.unshift({ time: evt.time, freq: evt.freq || 2437, marker: "RemoteID", rssi: evt.rssi || 0 });
   s.packets = s.packets.slice(0, 50);
-  sessions.set(evt.session, s);
-  renderSidebar();
-  renderRemoteIdMap(s, evt);
-  renderBannerRemoteId(s);
-  if (selectedSession === evt.session) renderInfo();
-}
-
-function renderBannerRemoteId(s) {
-  const fresh = s.lastTime && Date.now() - Date.parse(s.lastTime) < 15000;
-  $("banner").classList.toggle("hidden", !fresh);
-}
-
-function renderRemoteIdMap(s, evt) {
-  if (!map) return;
-  if (!s.trailLine) {
-    s.trailLine = L.polyline([], { color: "#d29922", weight: 2, opacity: 0.8 }).addTo(map);
-    s.droneDot = L.circleMarker([evt.lat, evt.lon], {
-      radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2,
-    }).addTo(map).bindTooltip("Drone — Remote ID");
-    if (s.opLat && s.opLon) {
-      s.opDot = L.circleMarker([s.opLat, s.opLon], {
-        radius: 6, color: "#3fb950", fillColor: "#3fb950", fillOpacity: 0.9, weight: 2,
-      }).addTo(map).bindTooltip("Operator position");
-      map.fitBounds(L.latLngBounds([[evt.lat, evt.lon], [s.opLat, s.opLon]]).pad(0.3));
-    }
-  }
-  s.trailLine.setLatLngs(s.trail);
-  s.droneDot.setLatLng([evt.lat, evt.lon]);
-  s.droneDot.bindPopup(
-    `<b>${evt.session}</b><br>${Number(evt.lat).toFixed(5)}, ${Number(evt.lon).toFixed(5)}` +
-    `<br>${Number(evt.alt).toFixed(1)} m · ${evt.status || ""}` +
-    (evt.selfid ? `<br>${evt.selfid}` : ""));
-  if (s.opDot && s.opLat) s.opDot.setLatLng([s.opLat, s.opLon]);
+  renderAll();
+  renderMap();
+  if (selectedKey === s.key) renderInfo();
 }
 
 function onDetection(evt) {
   if (!evt.crc) return;
-  const s = sessions.get(evt.session) || {
-    count: 0, infp: 0, cryp: 0, lastTime: null, bestRssi: -999, channels: new Map(), packets: [],
-  };
+  const mode = evt.mode || (statusMode === "replay" ? "replay" : "live");
+  const s = sess("djiid:" + evt.session, mode);
   s.count++;
   if (evt.marker === "CRYP") s.cryp++; else s.infp++;
   s.lastTime = evt.time;
   if (evt.rssi > s.bestRssi) s.bestRssi = evt.rssi;
   s.channels.set(evt.freq, (s.channels.get(evt.freq) || 0) + 1);
-  s.packets.unshift(evt);
+  s.packets.unshift({ time: evt.time, freq: evt.freq, marker: evt.marker, rssi: evt.rssi });
   s.packets = s.packets.slice(0, 50);
-  sessions.set(evt.session, s);
-  latestDetections.unshift(evt);
-  latestDetections = latestDetections.slice(0, 300);
+  renderAll();
+  renderMap();
+  if (selectedKey === s.key) renderInfo();
+}
+
+/* ---- aircraft grouping: merge rid + djiid sessions active together ---- */
+function aircraftList() {
+  const rids = [], djiids = [];
+  for (const s of sessions.values()) (s.source === "remoteid" ? rids : djiids).push(s);
+  const list = [];
+  const used = new Set();
+  for (const rid of rids) {
+    const entry = { rid, djiids: [], lastTime: rid.lastTime };
+    for (const dj of djiids) {
+      if (used.has(dj.key) || dj.mode !== rid.mode) continue;
+      if (Math.abs(tsec(dj.lastTime) - tsec(rid.lastTime)) < 180000) {
+        entry.djiids.push(dj);
+        used.add(dj.key);
+      }
+    }
+    entry.last = Math.max(tsec(rid.lastTime), ...entry.djiids.map((d) => tsec(d.lastTime)));
+    list.push(entry);
+  }
+  for (const dj of djiids) {
+    if (!used.has(dj.key)) list.push({ rid: null, djiids: [dj], last: tsec(dj.lastTime) });
+  }
+  list.sort((a, b) => b.last - a.last);
+  return list;
+}
+
+function entryId(e) {
+  return e.rid ? "rid:" + e.rid.key.slice(4) : e.djiids[0].key;
+}
+
+/* ---- rendering ---- */
+function renderAll() {
   renderSidebar();
-  renderMap(evt);
   renderBanner();
-  if (selectedSession === evt.session) renderInfo();
 }
 
 function renderBanner() {
-  const recent = latestDetections[0];
-  const fresh = recent && Date.now() - Date.parse(recent.time + "Z") < 15000;
-  $("banner").classList.toggle("hidden", !fresh);
+  const banner = $("banner");
+  if (statusMode === "replay") {
+    banner.textContent = "Replay — archived flight session";
+    banner.classList.remove("hidden");
+    banner.classList.add("replay");
+    return;
+  }
+  banner.classList.remove("replay");
+  const list = aircraftList();
+  const fresh = list.some((e) => e.last && Date.now() - e.last < 15000 && e.last > 0);
+  banner.textContent = "Drone detected — identification active";
+  banner.classList.toggle("hidden", !fresh);
 }
 
 function renderSidebar() {
-  const list = $("alert-list");
-  $("session-count").textContent = sessions.size;
-  const sorted = [...sessions.entries()].sort((a, b) =>
-    Date.parse(b[1].lastTime) - Date.parse(a[1].lastTime));
-  list.innerHTML = "";
-  for (const [hash, s] of sorted) {
-    const rid = s.source === "remoteid";
+  const list = aircraftList();
+  $("session-count").textContent = list.length;
+  const el = $("alert-list");
+  el.innerHTML = "";
+  for (const e of list) {
+    const id = entryId(e);
+    const rid = e.rid, dj = e.djiids[0];
     const div = document.createElement("div");
-    div.className = "alert" + (hash === selectedSession ? " selected" : "");
-    const model = rid ? "DJI Drone" : "DJI Avata 2";
-    const tag = rid ? "RemoteID" : "DroneID";
-    const meta = rid
-      ? `<b>${s.count}</b> fixes · ${s.pos ? Number(s.pos.alt).toFixed(1) + " m · " : ""}last ${fmtTime(s.lastTime)}`
-      : `<b>${s.count}</b> pkts · ${s.infp} INFP / ${s.cryp} CRYP · last ${fmtTime(s.lastTime)}`;
+    div.className = "alert" + (id === selectedKey ? " selected" : "");
+    let badges = "";
+    if (rid) badges += '<span class="tag tag-rid">RemoteID</span> ';
+    if (dj) badges += '<span class="tag">DroneID</span>';
+    if (e.djiids[0] && e.djiids[0].mode === "replay") badges += ' <span class="tag tag-replay">replay</span>';
+    const ident = rid ? rid.key.slice(4) : dj.key.slice(6);
+    const metaParts = [];
+    if (rid) metaParts.push(`RID ${rid.count} fixes`);
+    if (dj) metaParts.push(`DroneID ${dj.count} pkts (${dj.infp} INFP / ${dj.cryp} CRYP)`);
+    const lastIso = rid && (!dj || tsec(rid.lastTime) > tsec(dj.lastTime)) ? rid.lastTime : dj.lastTime;
+    metaParts.push(`last ${fmtTime(lastIso)}`);
     div.innerHTML = `
-      <div class="row1"><span class="model">${model}</span><span class="tag">${tag}</span></div>
-      <code>${hash}</code>
-      <div class="meta">${meta}</div>`;
-    div.onclick = () => { selectedSession = hash; renderSidebar(); renderInfo(); };
-    list.appendChild(div);
+      <div class="row1"><span class="model">DJI ${rid ? "Avata 2" : "Drone (OcuSync)"}</span><span>${badges}</span></div>
+      <code>${ident}</code>
+      <div class="meta">${metaParts.join(" · ")}</div>`;
+    div.onclick = () => { selectedKey = id; renderSidebar(); renderInfo(); };
+    el.appendChild(div);
   }
 }
 
@@ -150,77 +196,89 @@ function placeStation() {
   map.setView([station.lat, station.lon], 15);
 }
 
-function renderMap(evt) {
-  if (!map || !station) return;
-  // proximity ring from RSSI (stronger = closer); rough dBFS mapping
-  if (activityRing) activityRing.remove();
-  const rM = Math.max(60, Math.min(900, 60000 * Math.pow(2, (evt.rssi + 50) / 10)));
-  activityRing = L.circle([station.lat, station.lon], {
-    radius: rM, color: "#f85149", weight: 1, fillOpacity: 0.08,
-  }).addTo(map);
+function jitter() { return (Math.random() - 0.5) * 0.0016; }
 
-  // event dot: jittered around station so clusters are visible
-  const jitter = () => (Math.random() - 0.5) * 0.0016;
-  const color = evt.marker === "CRYP" ? "#d29922" : "#f85149";
-  L.circleMarker([station.lat + jitter(), station.lon + jitter()], {
-    radius: evt.marker === "CRYP" ? 6 : 4, color, fillColor: color,
-    fillOpacity: 0.85, weight: 1,
-  }).addTo(map)
-    .bindPopup(`<b>${evt.marker}</b> · session ${evt.session}<br>${evt.freq} MHz · ${evt.rssi} dBFS<br>${evt.time.slice(11, 19)} UTC`)
-    .on("click", () => { selectedSession = evt.session; renderSidebar(); renderInfo(); });
+function renderMap() {
+  if (!map || !station) return;
+  if (!dotLayer) dotLayer = L.layerGroup().addTo(map);
+  dotLayer.clearLayers();
+  if (activityRing) activityRing.remove();
+  const djs = [...sessions.values()].filter((s) => s.source === "droneid" && s.packets.length);
+  const latestDj = djs.sort((a, b) => tsec(b.lastTime) - tsec(a.lastTime))[0];
+  if (latestDj) {
+    const last = latestDj.packets[0];
+    const rM = Math.max(60, Math.min(900, 60000 * Math.pow(2, (last.rssi + 50) / 10)));
+    activityRing = L.circle([station.lat, station.lon], {
+      radius: rM, color: "#f85149", weight: 1, fillOpacity: 0.08,
+    }).addTo(dotLayer);
+  }
+  for (const p of latestDj ? latestDj.packets.slice(0, 60) : []) {
+    L.circleMarker([station.lat + jitter(), station.lon + jitter()], {
+      radius: p.marker === "CRYP" ? 6 : 4, color: p.marker === "CRYP" ? "#d29922" : "#f85149",
+      fillColor: p.marker === "CRYP" ? "#d29922" : "#f85149", fillOpacity: 0.85, weight: 1,
+    }).addTo(dotLayer).bindPopup(`<b>${p.marker}</b> · session ${latestDj.key.slice(6)}<br>${p.freq} MHz · ${p.rssi} dBFS`);
+  }
+  for (const s of sessions.values()) {
+    if (s.source !== "remoteid" || !s.packets.length) continue;
+    if (!s.trailLine) {
+      s.trailLine = L.polyline([], { color: "#d29922", weight: 2, opacity: 0.8 }).addTo(map);
+      s.droneDot = L.circleMarker([s.pos.lat, s.pos.lon], {
+        radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2,
+      }).addTo(map).bindTooltip("Drone — Remote ID");
+      if (s.opLat && s.opLon) {
+        s.opDot = L.circleMarker([s.opLat, s.opLon], {
+          radius: 6, color: "#3fb950", fillColor: "#3fb950", fillOpacity: 0.9, weight: 2,
+        }).addTo(map).bindTooltip("Operator position");
+        map.fitBounds(L.latLngBounds([[s.pos.lat, s.pos.lon], [s.opLat, s.opLon]]).pad(0.3));
+      }
+    }
+    s.trailLine.setLatLngs(s.trail);
+    s.droneDot.setLatLng([s.pos.lat, s.pos.lon]);
+    s.droneDot.bindPopup(`<b>${s.key.slice(4)}</b><br>${Number(s.pos.lat).toFixed(5)}, ${Number(s.pos.lon).toFixed(5)}` +
+      `<br>${Number(s.pos.alt).toFixed(1)} m${s.selfid ? `<br>${s.selfid}` : ""}`);
+    if (s.opDot && s.opLat) s.opDot.setLatLng([s.opLat, s.opLon]);
+  }
 }
 
 function renderInfo() {
-  const s = sessions.get(selectedSession);
-  if (!s) return;
+  const e = aircraftList().find((x) => entryId(x) === selectedKey);
+  if (!e) return;
   $("info-empty").classList.add("hidden");
   $("info-body").classList.remove("hidden");
-  $("i-session").textContent = selectedSession;
-  $("i-count").textContent = s.count;
-  if (s.source === "remoteid") {
-    $("i-mix").textContent = "Remote ID (plaintext)";
-    $("i-rssi").textContent = "—";
-    $("i-channels").textContent = "WiFi NAN · ch 6";
-    $("i-state").textContent = "position decoded (F3411)";
-    $("i-state").className = "ok";
-    const pos = s.pos ? `${Number(s.pos.lat).toFixed(6)}, ${Number(s.pos.lon).toFixed(6)}` : "—";
-    const op = s.opLat ? `${Number(s.opLat).toFixed(6)}, ${Number(s.opLon).toFixed(6)}` : "—";
-    const alt = s.pos ? `${Number(s.pos.alt).toFixed(1)} m · ${s.pos.status || ""}` : "—";
-    const rows = [["i-pos", pos], ["i-op", op], ["i-alt", alt]];
-    for (const [id, v] of rows) {
-      let el = $(id);
-      if (!el) {
-        el = document.createElement("div");
-        el.className = "kv";
-        el.id = id;
-        el.innerHTML = `<span>${id === "i-pos" ? "Drone position" : id === "i-op" ? "Operator position" : "Altitude / status"}</span><span></span>`;
-        $("i-state").insertAdjacentElement("afterend", el);
-      }
-      el.lastElementChild.textContent = v;
-      el.classList.remove("hidden");
-    }
-  $("i-marker").textContent = "RemoteID";
-  } else {
-    $("i-mix").textContent = `${s.infp} / ${s.cryp}`;
-    $("i-rssi").textContent = s.bestRssi.toFixed(1) + " dBFS";
-    $("i-state").textContent = "telemetry encrypted (O4)";
-    $("i-state").className = "ok";
-    for (const id of ["i-pos", "i-op", "i-alt"]) {
-      const el = $(id);
-      if (el) el.classList.add("hidden");
-    }
-    $("i-marker").textContent = "DroneID";
-    const chans = [...s.channels.entries()].sort((a, b) => b[1] - a[1])
-      .map(([c, n]) => `${c.toFixed(1)}×${n}`).join("  ");
-    $("i-channels").textContent = chans;
+  const rid = e.rid, dj = e.djiids[0];
+  const ident = rid ? rid.key.slice(4) : dj.key.slice(6);
+  $("i-model").textContent = rid ? "DJI Avata 2" : "DJI Drone (OcuSync)";
+  $("i-marker").textContent = rid ? "RemoteID + DroneID" : "DroneID";
+  const kv = [];
+  kv.push(["Identifier", `<code>${ident}</code>`]);
+  if (dj) {
+    kv.push(["DroneID session", `<code>${dj.key.slice(6)}</code>`]);
+    kv.push(["DroneID packets", `${dj.count} (${dj.infp} INFP / ${dj.cryp} CRYP)`]);
+    kv.push(["Channels", [...dj.channels.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c.toFixed(1)}×${n}`).join("  ")]);
+    kv.push(["Best signal", dj.bestRssi > -900 ? dj.bestRssi.toFixed(1) + " dBFS" : "—"]);
+    kv.push(["O4 telemetry", "encrypted (AES-CTR)"]);
   }
-  $("i-last").textContent = fmtTime(s.lastTime) + " UTC";
+  if (rid) {
+    kv.push(["Remote ID", "decoded (F3411 beacon)"]);
+    kv.push(["Position", rid.pos ? `${Number(rid.pos.lat).toFixed(6)}, ${Number(rid.pos.lon).toFixed(6)}` : "—"]);
+    if (rid.pos) kv.push(["Altitude / status", `${Number(rid.pos.alt).toFixed(1)} m · ${rid.pos.status || ""}`]);
+    kv.push(["Operator position", rid.opLat ? `${Number(rid.opLat).toFixed(6)}, ${Number(rid.opLon).toFixed(6)}` : "—"]);
+  }
+  const lastIso = rid && (!dj || tsec(rid.lastTime) > tsec(dj.lastTime)) ? rid.lastTime : dj.lastTime;
+  kv.push(["Last seen", fmtTime(lastIso) + " UTC"]);
+  const rows = kv.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+  $("info-kv").innerHTML = rows;
+  // merged packet table
+  const all = [];
+  if (rid) for (const p of rid.packets) all.push({ ...p, proto: "RID" });
+  if (dj) for (const p of dj.packets) all.push({ ...p, proto: "DJI" });
+  all.sort((a, b) => tsec(b.time) - tsec(a.time));
   const body = $("pkt-body");
   body.innerHTML = "";
-  for (const p of s.packets.slice(0, 20)) {
+  for (const p of all.slice(0, 20)) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${fmtTime(p.time)}</td><td>${p.freq.toFixed(1)}</td>` +
-      `<td class="${p.marker === "CRYP" ? "cryp" : ""}">${p.marker}</td><td>${p.rssi.toFixed(1)}</td>`;
+      `<td class="${p.marker === "CRYP" ? "cryp" : ""}">${p.marker}</td><td>${p.proto === "RID" ? "—" : p.rssi.toFixed(1)}</td>`;
     body.appendChild(tr);
   }
 }
@@ -233,19 +291,17 @@ function init() {
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", {
     maxZoom: 16,
   }).addTo(map);
-  map.setView([22.3193, 114.1694], 12);
+  map.setView([22.2783, 114.1747], 12);
 
   $("btn-scan").onclick = async () => {
     const running = $("btn-scan").textContent.startsWith("Stop");
     await fetch(running ? "/api/scan/stop" : "/api/scan/start", { method: "POST" });
   };
-  $("btn-replay").onclick = async () => {
-    await fetch("/api/replay/start", { method: "POST" });
-  };
+  $("btn-replay").onclick = async () => { await fetch("/api/replay/start", { method: "POST" }); };
   connect();
 }
 
-document.querySelectorAll("[data-coming]").forEach(el =>
+document.querySelectorAll("[data-coming]").forEach((el) =>
   el.addEventListener("click", () => alert("Coming soon")));
 
 init();

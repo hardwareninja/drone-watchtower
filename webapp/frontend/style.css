@@ -57,6 +57,9 @@ aside { background: var(--panel); border-right: 1px solid var(--border); display
 }
 .dim { color: var(--dim); font-weight: 400; }
 
+#banner.replay { background: rgba(210,153,34,.15); color: var(--warn); border-bottom-color: rgba(210,153,34,.35); }
+.tag-rid { background: rgba(63,185,80,.15); color: var(--ok); }
+.tag-replay { background: rgba(210,153,34,.2); color: var(--warn); }
 #alert-list { overflow-y: auto; }
 .alert {
   padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
