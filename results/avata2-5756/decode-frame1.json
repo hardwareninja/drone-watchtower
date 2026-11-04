@@ -1,0 +1,47 @@
+{
+  "input": "/home/drone/droneid-results/o4part-aa/20261104T081557.401397Z_5756500000_s64907094/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 260,
+  "burst_start_seconds": 1.6927083333333333e-05,
+  "initial_cp_score": 0.9894005060195923,
+  "cp_scores": [
+    0.18760421872138977,
+    0.9943558573722839,
+    0.9728888869285583,
+    0.993127703666687,
+    0.9900722503662109,
+    0.9899525046348572,
+    0.9889187812805176,
+    0.9948352575302124,
+    0.9910528659820557
+  ],
+  "cfo_hz": -2508.5830078125,
+  "root600_fd_score": 0.99953666323327,
+  "root147_fd_score": 0.9986507432609372,
+  "root600_raw_fd_score": 0.09715423106867249,
+  "root147_raw_fd_score": 0.09165628753830558,
+  "llr_scale": 60.9806353748799,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 131,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "8010494e46505c59ce6d2a1ed25b987445836d00daafdd7491089fa4344c614e54a1b34a6c05b8c59ce189c9f6fc59de4a109659281825cdd79b0cb397881f6cf8961a34caa95be11c91a65c0da2ba957df22adde94bb40f7bea56451bc4f03cb3ff2bc9097450f0f10e8bd1752ee324cd6819fb163b729204a368ebd9a625065a83df000000000000000000000000000000000000000000000000000000000000000000000000000000000000579081",
+  "payload_hex": "8010494e46505c59ce6d2a1ed25b987445836d00daafdd7491089fa4344c614e54a1b34a6c05b8c59ce189c9f6fc59de4a109659281825cdd79b0cb397881f6cf8961a34caa95be11c91a65c0da2ba957df22adde94bb40f7bea56451bc4f03cb3ff2bc9097450f0f10e8bd1752ee324cd6819fb163b729204a368ebd9a625065a83df",
+  "payload_sha256": "25c66ab70eaea6294c5a778560d32e48befc12d99635a9eb3041a799d8f006d2",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 128,
+    "message_type": 16,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0xDF83",
+    "body_entropy_bits_per_byte": 6.561403879634445
+  }
+}
