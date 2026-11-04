@@ -10,6 +10,7 @@ Usage: uvicorn app:app --host 0.0.0.0 --port 8080
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import subprocess
 import threading
@@ -18,6 +19,14 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+
+try:
+    import zmq
+    HAVE_ZMQ = True
+except ImportError:
+    HAVE_ZMQ = False
+
+REMOTEID_ZMQ = "tcp://127.0.0.1:4223"
 
 BASE = Path(__file__).resolve().parent
 FRONTEND = BASE.parent / "frontend"
@@ -186,6 +195,78 @@ async def ws(ws: WebSocket) -> None:
             await ws.receive_text()
     except WebSocketDisconnect:
         clients.discard(ws)
+
+
+def remoteid_event(drone: list) -> dict | None:
+    """Map a bkerler/DroneID macdb entry to a watchtower event."""
+    mac, serial, pos, sysinfo, selfid = None, None, None, None, None
+    for item in drone:
+        if isinstance(item, dict):
+            if "MAC" in item:
+                mac = item["MAC"]
+            bid = item.get("Basic ID") or {}
+            if bid.get("id") and "Serial" in str(bid.get("id_type", "")):
+                serial = bid["id"]
+            if "Location Vector" in item:
+                c = item["Location Vector"].get("coord") or {}
+                if c.get("latitude") or c.get("longitude"):
+                    pos = {
+                        "lat": c["latitude"] / 1e7,
+                        "lon": c["longitude"] / 1e7,
+                        "alt": (c.get("geodetic_altitude") or 0) / 1000,
+                        "speed": c.get("speed", 0),
+                        "dir": c.get("direction"),
+                        "status": item["Location Vector"].get("op_status"),
+                    }
+            if "System" in item:
+                s = item["System"]
+                if s.get("latitude") or s.get("longitude"):
+                    sysinfo = {"op_lat": s["latitude"] / 1e7, "op_lon": s["longitude"] / 1e7}
+            if "Self ID" in item:
+                selfid = item["Self ID"].get("text")
+    ident = serial or mac
+    if not ident or not pos:
+        return None
+    evt = {
+        "source": "remoteid",
+        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"),
+        "session": ident,
+        "marker": "RemoteID",
+        "mac": mac,
+        "selfid": selfid,
+        "crc": True,
+        "freq": 2437.0,
+        "rssi": 0,
+    }
+    evt.update(pos)
+    if sysinfo:
+        evt.update(sysinfo)
+    return evt
+
+
+def remoteid_loop() -> None:
+    if not HAVE_ZMQ:
+        return
+    ctx = zmq.Context.instance()
+    sub = ctx.socket(zmq.SUB)
+    sub.setsockopt_string(zmq.SUBSCRIBE, "")
+    sub.connect(REMOTEID_ZMQ)
+    while True:
+        try:
+            raw = sub.recv_string()
+            for drone in json.loads(raw):
+                evt = remoteid_event(drone)
+                if evt:
+                    publish_event(evt)
+        except json.JSONDecodeError:
+            continue
+        except Exception:
+            time.sleep(1)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    threading.Thread(target=remoteid_loop, daemon=True).start()
 
 
 app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="frontend")

@@ -17,6 +17,7 @@ function connect() {
     const msg = JSON.parse(m.data);
     if (msg.type === "status") setStatus(msg.status);
     if (msg.type === "detection") onDetection(msg.event);
+    if (msg.type === "remoteid") onRemoteId(msg.event);
   };
   ws.onclose = () => setTimeout(connect, 1500);
 }
@@ -30,6 +31,57 @@ function setStatus(st) {
   $("btn-replay").disabled = st.running;
   $("btn-scan").disabled = st.running && st.mode === "replay";
   if (map && station && !stationMarker) placeStation();
+}
+
+function onRemoteId(evt) {
+  const s = sessions.get(evt.session) || {
+    source: "remoteid", count: 0, infp: 0, cryp: 0, lastTime: null,
+    bestRssi: 0, channels: new Map(), packets: [], trail: [],
+  };
+  s.count++;
+  s.source = "remoteid";
+  s.lastTime = evt.time;
+  s.selfid = evt.selfid;
+  s.opLat = evt.op_lat;
+  s.opLon = evt.op_lon;
+  s.pos = { lat: evt.lat, lon: evt.lon, alt: evt.alt, speed: evt.speed, status: evt.status };
+  s.trail.push([evt.lat, evt.lon]);
+  if (s.trail.length > 300) s.trail.shift();
+  s.packets.unshift({ time: evt.time, freq: 2437, marker: "RemoteID", rssi: 0, lat: evt.lat, lon: evt.lon });
+  s.packets = s.packets.slice(0, 50);
+  sessions.set(evt.session, s);
+  renderSidebar();
+  renderRemoteIdMap(s, evt);
+  renderBannerRemoteId(s);
+  if (selectedSession === evt.session) renderInfo();
+}
+
+function renderBannerRemoteId(s) {
+  const fresh = s.lastTime && Date.now() - Date.parse(s.lastTime) < 15000;
+  $("banner").classList.toggle("hidden", !fresh);
+}
+
+function renderRemoteIdMap(s, evt) {
+  if (!map) return;
+  if (!s.trailLine) {
+    s.trailLine = L.polyline([], { color: "#d29922", weight: 2, opacity: 0.8 }).addTo(map);
+    s.droneDot = L.circleMarker([evt.lat, evt.lon], {
+      radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2,
+    }).addTo(map).bindTooltip("Drone — Remote ID");
+    if (s.opLat && s.opLon) {
+      s.opDot = L.circleMarker([s.opLat, s.opLon], {
+        radius: 6, color: "#3fb950", fillColor: "#3fb950", fillOpacity: 0.9, weight: 2,
+      }).addTo(map).bindTooltip("Operator position");
+      map.fitBounds(L.latLngBounds([[evt.lat, evt.lon], [s.opLat, s.opLon]]).pad(0.3));
+    }
+  }
+  s.trailLine.setLatLngs(s.trail);
+  s.droneDot.setLatLng([evt.lat, evt.lon]);
+  s.droneDot.bindPopup(
+    `<b>${evt.session}</b><br>${Number(evt.lat).toFixed(5)}, ${Number(evt.lon).toFixed(5)}` +
+    `<br>${Number(evt.alt).toFixed(1)} m · ${evt.status || ""}` +
+    (evt.selfid ? `<br>${evt.selfid}` : ""));
+  if (s.opDot && s.opLat) s.opDot.setLatLng([s.opLat, s.opLon]);
 }
 
 function onDetection(evt) {
@@ -66,12 +118,18 @@ function renderSidebar() {
     Date.parse(b[1].lastTime) - Date.parse(a[1].lastTime));
   list.innerHTML = "";
   for (const [hash, s] of sorted) {
+    const rid = s.source === "remoteid";
     const div = document.createElement("div");
     div.className = "alert" + (hash === selectedSession ? " selected" : "");
+    const model = rid ? "DJI Drone" : "DJI Avata 2";
+    const tag = rid ? "RemoteID" : "DroneID";
+    const meta = rid
+      ? `<b>${s.count}</b> fixes · ${s.pos ? Number(s.pos.alt).toFixed(1) + " m · " : ""}last ${fmtTime(s.lastTime)}`
+      : `<b>${s.count}</b> pkts · ${s.infp} INFP / ${s.cryp} CRYP · last ${fmtTime(s.lastTime)}`;
     div.innerHTML = `
-      <div class="row1"><span class="model">DJI Avata 2</span><span class="tag">DroneID</span></div>
+      <div class="row1"><span class="model">${model}</span><span class="tag">${tag}</span></div>
       <code>${hash}</code>
-      <div class="meta"><b>${s.count}</b> pkts · ${s.infp} INFP / ${s.cryp} CRYP · last ${fmtTime(s.lastTime)}</div>`;
+      <div class="meta">${meta}</div>`;
     div.onclick = () => { selectedSession = hash; renderSidebar(); renderInfo(); };
     list.appendChild(div);
   }
@@ -119,12 +177,44 @@ function renderInfo() {
   $("info-body").classList.remove("hidden");
   $("i-session").textContent = selectedSession;
   $("i-count").textContent = s.count;
-  $("i-mix").textContent = `${s.infp} / ${s.cryp}`;
+  if (s.source === "remoteid") {
+    $("i-mix").textContent = "Remote ID (plaintext)";
+    $("i-rssi").textContent = "—";
+    $("i-channels").textContent = "WiFi NAN · ch 6";
+    $("i-state").textContent = "position decoded (F3411)";
+    $("i-state").className = "ok";
+    const pos = s.pos ? `${Number(s.pos.lat).toFixed(6)}, ${Number(s.pos.lon).toFixed(6)}` : "—";
+    const op = s.opLat ? `${Number(s.opLat).toFixed(6)}, ${Number(s.opLon).toFixed(6)}` : "—";
+    const alt = s.pos ? `${Number(s.pos.alt).toFixed(1)} m · ${s.pos.status || ""}` : "—";
+    const rows = [["i-pos", pos], ["i-op", op], ["i-alt", alt]];
+    for (const [id, v] of rows) {
+      let el = $(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "kv";
+        el.id = id;
+        el.innerHTML = `<span>${id === "i-pos" ? "Drone position" : id === "i-op" ? "Operator position" : "Altitude / status"}</span><span></span>`;
+        $("i-state").insertAdjacentElement("afterend", el);
+      }
+      el.lastElementChild.textContent = v;
+      el.classList.remove("hidden");
+    }
+  $("i-marker").textContent = "RemoteID";
+  } else {
+    $("i-mix").textContent = `${s.infp} / ${s.cryp}`;
+    $("i-rssi").textContent = s.bestRssi.toFixed(1) + " dBFS";
+    $("i-state").textContent = "telemetry encrypted (O4)";
+    $("i-state").className = "ok";
+    for (const id of ["i-pos", "i-op", "i-alt"]) {
+      const el = $(id);
+      if (el) el.classList.add("hidden");
+    }
+    $("i-marker").textContent = "DroneID";
+    const chans = [...s.channels.entries()].sort((a, b) => b[1] - a[1])
+      .map(([c, n]) => `${c.toFixed(1)}×${n}`).join("  ");
+    $("i-channels").textContent = chans;
+  }
   $("i-last").textContent = fmtTime(s.lastTime) + " UTC";
-  $("i-rssi").textContent = s.bestRssi.toFixed(1) + " dBFS";
-  const chans = [...s.channels.entries()].sort((a, b) => b[1] - a[1])
-    .map(([c, n]) => `${c.toFixed(1)}×${n}`).join("  ");
-  $("i-channels").textContent = chans;
   const body = $("pkt-body");
   body.innerHTML = "";
   for (const p of s.packets.slice(0, 20)) {
