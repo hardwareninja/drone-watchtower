@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drone Watchtower — Live Detection</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="sysname">Drone Watchtower</div>
+    <div class="tabs">
+      <span class="tab active" id="tab-monitor">Live Monitoring</span>
+      <span class="tab" data-coming>Statistics</span>
+      <span class="tab" data-coming>Events</span>
+    </div>
+    <div class="controls">
+      <button id="btn-scan">Start Scan</button>
+      <button id="btn-replay" class="ghost">Replay Session</button>
+      <span id="status-pill" class="pill">idle</span>
+    </div>
+  </header>
+
+  <div id="banner" class="hidden">Drone detected — DroneID telemetry active</div>
+
+  <main>
+    <aside id="sidebar">
+      <div class="side-head">
+        <span>Detection Alerts</span>
+        <span id="session-count" class="dim">0</span>
+      </div>
+      <div id="alert-list"></div>
+    </aside>
+
+    <section id="mapwrap">
+      <div id="map"></div>
+    </section>
+
+    <aside id="infopanel">
+      <div id="info-empty">Select a session to view drone details</div>
+      <div id="info-body" class="hidden">
+        <div class="info-title">
+          <span id="i-model">DJI Drone</span>
+          <span id="i-marker" class="pill">DroneID</span>
+        </div>
+        <div class="kv"><span>Session hash ID</span><code id="i-session"></code></div>
+        <div class="kv"><span>Packets</span><span id="i-count"></span></div>
+        <div class="kv"><span>INFP / CRYP</span><span id="i-mix"></span></div>
+        <div class="kv"><span>Last seen</span><span id="i-last"></span></div>
+        <div class="kv"><span>Best signal</span><span id="i-rssi"></span></div>
+        <div class="kv"><span>Channels</span><span id="i-channels"></span></div>
+        <div class="kv"><span>State</span><span id="i-state" class="ok">telemetry encrypted (O4)</span></div>
+        <h3>Recent packets</h3>
+        <table id="pkt-table">
+          <thead><tr><th>Time</th><th>Ch</th><th>Type</th><th>dBFS</th></tr></thead>
+          <tbody id="pkt-body"></tbody>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
