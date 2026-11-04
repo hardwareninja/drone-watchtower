@@ -26,7 +26,7 @@ try:
 except ImportError:
     HAVE_ZMQ = False
 
-REMOTEID_ZMQ = "tcp://127.0.0.1:4223"
+REMOTEID_ZMQ = ["tcp://127.0.0.1:4223", "tcp://127.0.0.1:4222"]  # wifi + bluetooth receivers
 
 BASE = Path(__file__).resolve().parent
 FRONTEND = BASE.parent / "frontend"
@@ -244,13 +244,13 @@ def remoteid_event(drone: list) -> dict | None:
     return evt
 
 
-def remoteid_loop() -> None:
+def remoteid_loop(endpoint: str) -> None:
     if not HAVE_ZMQ:
         return
     ctx = zmq.Context.instance()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt_string(zmq.SUBSCRIBE, "")
-    sub.connect(REMOTEID_ZMQ)
+    sub.connect(endpoint)
     while True:
         try:
             raw = sub.recv_string()
@@ -266,7 +266,8 @@ def remoteid_loop() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    threading.Thread(target=remoteid_loop, daemon=True).start()
+    for endpoint in REMOTEID_ZMQ:
+        threading.Thread(target=remoteid_loop, args=(endpoint,), daemon=True).start()
 
 
 app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="frontend")
