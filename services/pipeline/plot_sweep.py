@@ -24,7 +24,8 @@ def main() -> int:
             parts = line.rstrip("\n").split(", ")
             if len(parts) < 7:
                 continue
-            low, high, binw = int(parts[2]), int(parts[3]), int(parts[4])
+            low, high = int(parts[2]), int(parts[3])
+            binw = int(float(parts[4]))
             db = [float(x) for x in parts[6:] if x.strip()]
             f = np.arange(low, high, binw)[: len(db)]
             freqs.extend(f)
