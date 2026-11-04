@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 let map, stationMarker, activityRing, dotLayer;
 let station = null;
 let statusMode = null;
+let selectedKey = null;
 const sessions = new Map(); // "rid:<serial>" | "djiid:<hash>" -> session
 
 function fmtTime(iso) {
