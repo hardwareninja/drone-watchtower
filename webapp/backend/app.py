@@ -26,7 +26,7 @@ try:
 except ImportError:
     HAVE_ZMQ = False
 
-REMOTEID_ZMQ = ["tcp://127.0.0.1:4223", "tcp://127.0.0.1:4222"]  # wifi + bluetooth receivers
+REMOTEID_ZMQ = ["tcp://127.0.0.1:4223", "tcp://127.0.0.1:4222", "tcp://127.0.0.1:4225"]  # wifi / ble / dji-beacon
 
 BASE = Path(__file__).resolve().parent
 FRONTEND = BASE.parent / "frontend"
@@ -254,7 +254,11 @@ def remoteid_loop(endpoint: str) -> None:
     while True:
         try:
             raw = sub.recv_string()
-            for drone in json.loads(raw):
+            data = json.loads(raw)
+            if isinstance(data, dict) and "watchtower_event" in data:
+                publish_event(data["watchtower_event"])
+                continue
+            for drone in data:
                 evt = remoteid_event(drone)
                 if evt:
                     publish_event(evt)
