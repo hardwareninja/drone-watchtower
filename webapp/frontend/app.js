@@ -87,7 +87,7 @@ function renderRemoteIdMap(s, evt) {
 function onDetection(evt) {
   if (!evt.crc) return;
   const s = sessions.get(evt.session) || {
-    count: 0, infp: 0, cryp: 0, lastTime: null, bestRssi: 0, channels: new Map(), packets: [],
+    count: 0, infp: 0, cryp: 0, lastTime: null, bestRssi: -999, channels: new Map(), packets: [],
   };
   s.count++;
   if (evt.marker === "CRYP") s.cryp++; else s.infp++;
