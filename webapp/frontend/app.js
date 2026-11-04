@@ -283,6 +283,106 @@ function renderInfo() {
   }
 }
 
+/* ---- history (Events tab) ---- */
+let view = "live";
+let historySessions = [];
+let historyLayer = null;
+let selectedHistory = null;
+
+function switchView(v) {
+  view = v;
+  $("tab-monitor").classList.toggle("active", v === "live");
+  $("tab-history").classList.toggle("active", v === "history");
+  if (v === "history") {
+    $("side-head-label").textContent = "Session History";
+    loadHistory();
+  } else {
+    $("side-head-label").textContent = "Detection Alerts";
+    if (historyLayer) { historyLayer.remove(); historyLayer = null; }
+    renderAll();
+    if (selectedKey) renderInfo();
+  }
+}
+
+async function loadHistory() {
+  historySessions = await (await fetch("/api/history/sessions?limit=100")).json();
+  renderHistoryList();
+}
+
+function renderHistoryList() {
+  $("session-count").textContent = historySessions.length;
+  const el = $("alert-list");
+  el.innerHTML = "";
+  for (const h of historySessions) {
+    const div = document.createElement("div");
+    div.className = "alert" + (selectedHistory === h.session ? " selected" : "");
+    const rid = (h.sources || "").includes("remoteid");
+    const dj = (h.sources || "").includes("droneid");
+    let badges = "";
+    if (rid) badges += '<span class="tag tag-rid">RemoteID</span> ';
+    if (dj) badges += '<span class="tag">DroneID</span>';
+    div.innerHTML = `
+      <div class="row1"><span class="model">${rid ? "DJI Avata 2" : "DJI Drone (OcuSync)"}</span><span>${badges}</span></div>
+      <code>${h.session}</code>
+      <div class="meta"><b>${h.n}</b> events · ${h.first ? h.first.slice(11, 19) : "?"} → ${h.last ? h.last.slice(11, 19) : "?"} UTC</div>`;
+    div.onclick = () => { selectedHistory = h.session; renderHistoryList(); showHistoryDetail(h); };
+    el.appendChild(div);
+  }
+}
+
+async function showHistoryDetail(h) {
+  const evs = await (await fetch(`/api/history/events?session=${encodeURIComponent(h.session)}&limit=500`)).json();
+  $("info-empty").classList.add("hidden");
+  $("info-body").classList.remove("hidden");
+  const rid = (h.sources || "").includes("remoteid");
+  $("i-model").textContent = rid ? "DJI Avata 2 (history)" : "DJI Drone (history)";
+  $("i-marker").textContent = "History";
+  const kv = [
+    ["Identifier", `<code>${h.session}</code>`],
+    ["Events", h.n],
+    ["Protocols", h.sources],
+    ["First seen", (h.first || "").slice(11, 19) + " UTC"],
+    ["Last seen", (h.last || "").slice(11, 19) + " UTC"],
+    ["Markers", h.markers],
+  ];
+  $("info-kv").innerHTML = kv.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+  const body = $("pkt-body");
+  body.innerHTML = "";
+  for (const e of evs.slice(0, 20)) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${(e.time || "").slice(11, 23)}</td><td>${e.freq ? e.freq.toFixed(1) : "—"}</td>` +
+      `<td class="${e.marker === "CRYP" ? "cryp" : ""}">${e.marker || "?"}</td>` +
+      `<td>${e.rssi != null && e.source !== "remoteid" ? e.rssi.toFixed(1) : "—"}</td>`;
+    body.appendChild(tr);
+  }
+  drawHistoryMap(evs);
+}
+
+function drawHistoryMap(evs) {
+  if (!map) return;
+  if (historyLayer) historyLayer.remove();
+  historyLayer = L.layerGroup().addTo(map);
+  const ridPts = evs.filter((e) => e.lat || e.lon).sort((a, b) => (a.time < b.time ? -1 : 1));
+  if (ridPts.length) {
+    const latlngs = ridPts.map((e) => [e.lat, e.lon]);
+    L.polyline(latlngs, { color: "#d29922", weight: 2, opacity: 0.8 }).addTo(historyLayer);
+    const last = latlngs[latlngs.length - 1];
+    L.circleMarker(last, { radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2 })
+      .addTo(historyLayer).bindTooltip("Drone — last position");
+    map.fitBounds(L.latLngBounds(latlngs).pad(0.3));
+  }
+  const stationPts = evs.filter((e) => !e.lat && !e.lon);
+  for (const e of stationPts.slice(0, 60)) {
+    if (!station) break;
+    L.circleMarker([station.lat + jitter(), station.lon + jitter()], {
+      radius: e.marker === "CRYP" ? 5 : 3.2,
+      color: e.marker === "CRYP" ? "#d29922" : "#f85149",
+      fillColor: e.marker === "CRYP" ? "#d29922" : "#f85149",
+      fillOpacity: 0.85, weight: 1,
+    }).addTo(historyLayer).bindPopup(`<b>${e.marker}</b><br>${e.freq} MHz · ${(e.time || "").slice(11, 19)}`);
+  }
+}
+
 function init() {
   map = L.map("map", { zoomControl: true, attributionControl: false });
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
@@ -298,6 +398,8 @@ function init() {
     await fetch(running ? "/api/scan/stop" : "/api/scan/start", { method: "POST" });
   };
   $("btn-replay").onclick = async () => { await fetch("/api/replay/start", { method: "POST" }); };
+  $("tab-monitor").onclick = () => switchView("live");
+  $("tab-history").onclick = () => switchView("history");
   connect();
 }
 

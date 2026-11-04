@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import sqlite3
 import subprocess
 import threading
 import time
@@ -72,6 +73,58 @@ def parse_line(line: str) -> dict | None:
         return None
 
 
+DB = Path("/opt/watchtower-web/data/history.db")
+DB.parent.mkdir(parents=True, exist_ok=True)
+
+
+def db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def insert_event(evt: dict) -> None:
+    try:
+        with db_conn() as c:
+            c.execute(
+                "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (evt.get("time"), evt.get("session"), evt.get("source"),
+                 evt.get("marker"), evt.get("freq"), evt.get("rssi"),
+                 evt.get("lat"), evt.get("lon"), evt.get("alt"),
+                 1 if evt.get("crc") else 0),
+            )
+    except sqlite3.Error as e:  # storage must never break detection
+        print(f"history insert failed: {e}", flush=True)
+
+
+def init_db() -> None:
+    with db_conn() as c:
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS events (
+                time TEXT, session TEXT, source TEXT, marker TEXT,
+                freq REAL, rssi REAL, lat REAL, lon REAL, alt REAL, crc INTEGER)"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(time)")
+    marker = DB.parent / ".imported"
+    if marker.exists():
+        return
+    imported = 0
+    for path in RESULTS.glob("*/detections.jsonl"):  # one-time archive import
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            evt = parse_line(line)
+            if evt and evt.get("crc"):
+                evt["source"] = "droneid"
+                insert_event(evt)
+                imported += 1
+    marker.write_text(f"{imported} imported at {time.ctime()}")
+    print(f"history: imported {imported} archived events", flush=True)
+
+
 def broadcast(msg: dict) -> None:
     if loop is None or not clients:
         return
@@ -83,7 +136,9 @@ def broadcast(msg: dict) -> None:
 def publish_event(evt: dict) -> None:
     with lock:
         state["events"] += 1
-    broadcast({"type": "detection", "event": evt})
+    insert_event(evt)
+    typ = "remoteid" if evt.get("source") == "remoteid" else "detection"
+    broadcast({"type": typ, "event": evt})
 
 
 def status_dict() -> dict:
@@ -185,6 +240,29 @@ def status() -> dict:
     return status_dict()
 
 
+@app.get("/api/history/sessions")
+def history_sessions(limit: int = 100) -> list:
+    with db_conn() as c:
+        rows = c.execute(
+            """SELECT session, MIN(time) first, MAX(time) last, COUNT(*) n,
+                      MAX(rssi) best, GROUP_CONCAT(DISTINCT source) sources,
+                      GROUP_CONCAT(DISTINCT marker) markers
+               FROM events GROUP BY session ORDER BY last DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/history/events")
+def history_events(session: str, limit: int = 500) -> list:
+    with db_conn() as c:
+        rows = c.execute(
+            "SELECT * FROM events WHERE session=? ORDER BY time DESC LIMIT ?",
+            (session, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.websocket("/ws")
 async def ws(ws: WebSocket) -> None:
     global loop
@@ -272,6 +350,7 @@ def remoteid_loop(endpoint: str) -> None:
 
 @app.on_event("startup")
 def startup() -> None:
+    init_db()
     for endpoint in REMOTEID_ZMQ:
         threading.Thread(target=remoteid_loop, args=(endpoint,), daemon=True).start()
 

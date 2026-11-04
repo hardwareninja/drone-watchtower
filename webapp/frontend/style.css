@@ -26,6 +26,7 @@ body {
 .tabs { display: flex; gap: 4px; flex: 1; }
 .tab { padding: 4px 12px; border-radius: 6px; color: var(--dim); cursor: default; }
 .tab.active { color: var(--ok); background: rgba(63,185,80,.12); }
+#tab-monitor, #tab-history { cursor: pointer; }
 .controls { display: flex; gap: 8px; align-items: center; }
 button {
   background: var(--accent); color: #fff; border: 0; border-radius: 6px;
