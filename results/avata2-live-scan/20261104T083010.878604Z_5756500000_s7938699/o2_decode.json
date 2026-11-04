@@ -1,0 +1,47 @@
+{
+  "input": "/home/drone/droneid-results/live-162835/20261104T083010.878604Z_5756500000_s7938699/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 260,
+  "burst_start_seconds": 1.6927083333333333e-05,
+  "initial_cp_score": 0.9865992665290833,
+  "cp_scores": [
+    0.2185290902853012,
+    0.9905472993850708,
+    0.9832309484481812,
+    0.9849628210067749,
+    0.9761785268783569,
+    0.9874371290206909,
+    0.9905402064323425,
+    0.9912158250808716,
+    0.9886814951896667
+  ],
+  "cfo_hz": -2966.637451171875,
+  "root600_fd_score": 0.99881033097967,
+  "root147_fd_score": 0.996568703189415,
+  "root600_raw_fd_score": 0.08956185792741556,
+  "root147_raw_fd_score": 0.09004674279551012,
+  "llr_scale": 60.23110881879525,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 163,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "a011494e4650a6556e8ec163505c55b873e58d00eac441dbfb58a816fd3bd097ff028d78ddae6bfc83e8fe5725d766829731f0074fcae2fea380d648d1c0c6741860d4611c252eec3061f63d75720424b2c1246506c559353c0216570ce3d4cb3896f1142b6fb62906c811f75b6ea615700368796a673040bd3e3d45e010daaed11f2fea82178ec5996a2b4636c260848ecfb91511fa71d50cd35a605552e1e31d5fa100000000000000000000b9fa2e",
+  "payload_hex": "a011494e4650a6556e8ec163505c55b873e58d00eac441dbfb58a816fd3bd097ff028d78ddae6bfc83e8fe5725d766829731f0074fcae2fea380d648d1c0c6741860d4611c252eec3061f63d75720424b2c1246506c559353c0216570ce3d4cb3896f1142b6fb62906c811f75b6ea615700368796a673040bd3e3d45e010daaed11f2fea82178ec5996a2b4636c260848ecfb91511fa71d50cd35a605552e1e31d5fa1",
+  "payload_sha256": "dd7c5ffecb0081596ff9d9b8d6ac5617938269cd85bbc4ebaff3669f6f39d36e",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 160,
+    "message_type": 17,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0xA15F",
+    "body_entropy_bits_per_byte": 6.858388222539132
+  }
+}

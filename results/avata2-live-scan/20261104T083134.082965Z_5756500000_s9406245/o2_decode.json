@@ -1,0 +1,47 @@
+{
+  "input": "/home/drone/droneid-results/live-162835/20261104T083134.082965Z_5756500000_s9406245/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 261,
+  "burst_start_seconds": 1.69921875e-05,
+  "initial_cp_score": 0.9862536787986755,
+  "cp_scores": [
+    0.13834349811077118,
+    0.9798423647880554,
+    0.982742965221405,
+    0.9929248094558716,
+    0.9863714575767517,
+    0.9825280904769897,
+    0.9925165772438049,
+    0.9868662357330322,
+    0.9862367510795593
+  ],
+  "cfo_hz": -2892.96728515625,
+  "root600_fd_score": 0.999116914147498,
+  "root147_fd_score": 0.9962019195934884,
+  "root600_raw_fd_score": 0.07664989029068175,
+  "root147_raw_fd_score": 0.08394343809369378,
+  "llr_scale": 61.198143323960785,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 131,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "8010494e4650a6556e8e69e00edc40df0a146d004d19a634e3e634c29f8dbe7d8764e606e9e65e4eda3ed833ff6dd9a9f334c2c8c453f881846264a468fca29777a38e648821ae62ec5447869fb141b1c66d8627db033d47029274cca069713ea31e9c3c02ca8678f67239d9f27adc66ff390a2f5881043512c247343a93ec1396884a000000000000000000000000000000000000000000000000000000000000000000000000000000000000c23f4d",
+  "payload_hex": "8010494e4650a6556e8e69e00edc40df0a146d004d19a634e3e634c29f8dbe7d8764e606e9e65e4eda3ed833ff6dd9a9f334c2c8c453f881846264a468fca29777a38e648821ae62ec5447869fb141b1c66d8627db033d47029274cca069713ea31e9c3c02ca8678f67239d9f27adc66ff390a2f5881043512c247343a93ec1396884a",
+  "payload_sha256": "bece2c35e084746931c615c163a837592e99f60d14a0555e413d392443f3abf7",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 128,
+    "message_type": 16,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0x4A88",
+    "body_entropy_bits_per_byte": 6.433335670921921
+  }
+}

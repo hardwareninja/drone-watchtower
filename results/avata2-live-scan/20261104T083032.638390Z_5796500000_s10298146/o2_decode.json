@@ -1,0 +1,47 @@
+{
+  "input": "/home/drone/droneid-results/live-162835/20261104T083032.638390Z_5796500000_s10298146/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 260,
+  "burst_start_seconds": 1.6927083333333333e-05,
+  "initial_cp_score": 0.9884462356567383,
+  "cp_scores": [
+    0.1104612872004509,
+    0.9883529543876648,
+    0.9825595617294312,
+    0.9904129505157471,
+    0.9895108938217163,
+    0.9942193031311035,
+    0.990501880645752,
+    0.9849966168403625,
+    0.9870159029960632
+  ],
+  "cfo_hz": -2976.02880859375,
+  "root600_fd_score": 0.9991297945138822,
+  "root147_fd_score": 0.9972785349544189,
+  "root600_raw_fd_score": 0.12511158578404274,
+  "root147_raw_fd_score": 0.12203659102659094,
+  "llr_scale": 60.90462183240614,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 131,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "8010494e4650a6556e8e45caacd5cb651d766d006243e9e1d4798f8ec8f7cc7dbb9c6785dfbcdf3d37757f153ea3516dd3a3e80943da2269fa058b63bf35798310c344a857ceed9d61745776f858d1c5c6e00176cd6b85ba9f997b52f69c0e44f8083e269ba08774b9c21c274ded6edef3fd71e046034321f01c437f6e4e46df7b9bcf000000000000000000000000000000000000000000000000000000000000000000000000000000000000fad69f",
+  "payload_hex": "8010494e4650a6556e8e45caacd5cb651d766d006243e9e1d4798f8ec8f7cc7dbb9c6785dfbcdf3d37757f153ea3516dd3a3e80943da2269fa058b63bf35798310c344a857ceed9d61745776f858d1c5c6e00176cd6b85ba9f997b52f69c0e44f8083e269ba08774b9c21c274ded6edef3fd71e046034321f01c437f6e4e46df7b9bcf",
+  "payload_sha256": "491afe754cb813fa60ca01728773bd62bae002271c9ac711384c6cd0233aff61",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 128,
+    "message_type": 16,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0xCF9B",
+    "body_entropy_bits_per_byte": 6.50821578906623
+  }
+}

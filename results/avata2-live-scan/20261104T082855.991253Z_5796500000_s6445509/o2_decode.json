@@ -1,0 +1,47 @@
+{
+  "input": "/home/drone/droneid-results/live-162835/20261104T082855.991253Z_5796500000_s6445509/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 260,
+  "burst_start_seconds": 1.6927083333333333e-05,
+  "initial_cp_score": 0.9879854321479797,
+  "cp_scores": [
+    0.1028403788805008,
+    0.9875560998916626,
+    0.9886200428009033,
+    0.9839133024215698,
+    0.989944577217102,
+    0.9898896217346191,
+    0.9874760508537292,
+    0.9869737029075623,
+    0.9895097613334656
+  ],
+  "cfo_hz": -2189.5595703125,
+  "root600_fd_score": 0.9994407095564684,
+  "root147_fd_score": 0.9972636851200429,
+  "root600_raw_fd_score": 0.11773596339720147,
+  "root147_raw_fd_score": 0.11418440717914467,
+  "llr_scale": 60.30193621374078,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 131,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "8010494e4650a6556e8e188105e90f3b81786d007284330c06afa741ba0a6c52b011de5d72b1a3ec33946265eecf2ef14e98a36c91e49fae537d536f0721171cb094d1990d013ebffa183c7f5ccd3ffb6b13bf80d425b73637eb10ad8d7de7c83675b109c6acc61fc909bbcc6d7d27cd28341259fa2c3f1f6d5339446d632ded7bbb3f000000000000000000000000000000000000000000000000000000000000000000000000000000000000dad4bd",
+  "payload_hex": "8010494e4650a6556e8e188105e90f3b81786d007284330c06afa741ba0a6c52b011de5d72b1a3ec33946265eecf2ef14e98a36c91e49fae537d536f0721171cb094d1990d013ebffa183c7f5ccd3ffb6b13bf80d425b73637eb10ad8d7de7c83675b109c6acc61fc909bbcc6d7d27cd28341259fa2c3f1f6d5339446d632ded7bbb3f",
+  "payload_sha256": "29771d36e11a5e291ee1d7df1f659b3d5e414bc2aeba95fe2351e42eab4ebbe8",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 128,
+    "message_type": 16,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0x3FBB",
+    "body_entropy_bits_per_byte": 6.567347875714471
+  }
+}

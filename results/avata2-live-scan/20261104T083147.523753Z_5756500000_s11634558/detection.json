@@ -1,0 +1,55 @@
+{
+  "input": "/home/drone/droneid-results/live-162835/20261104T083147.523753Z_5756500000_s11634558/candidate.iq",
+  "sample_rate_hz": 15360000.0,
+  "root600_time_seconds": 0.0002359375,
+  "burst_start_sample": 261,
+  "burst_start_seconds": 1.69921875e-05,
+  "initial_cp_score": 0.988209068775177,
+  "cp_scores": [
+    0.0321974977850914,
+    0.9905616044998169,
+    0.9864550232887268,
+    0.9854533076286316,
+    0.9910746812820435,
+    0.9854227900505066,
+    0.9878494143486023,
+    0.9844855666160583,
+    0.9943700432777405
+  ],
+  "cfo_hz": -2897.440185546875,
+  "root600_fd_score": 0.9988877510880941,
+  "root147_fd_score": 0.9967655346577247,
+  "root600_raw_fd_score": 0.1298435652453157,
+  "root147_raw_fd_score": 0.11876994513160827,
+  "llr_scale": 61.34298156678166,
+  "turbo_attempts": [
+    {
+      "iterations": 4,
+      "crc24a_remainder": "0x000000"
+    }
+  ],
+  "crc24a_remainder": "0x000000",
+  "crc24a_ok": true,
+  "payload_length": 131,
+  "dji_crc16_remainder": "0x0000",
+  "dji_crc16_ok": true,
+  "transport_hex": "8010494e4650a6556e8e0ecb43e4d14b25696d00e7f4b95ecb3657df1533f67e33975e960d5c0456dedb762c0ace12b1376e0863fe5afb5ec48bda52378e1937222261d41e37ee9251c62095de1b1dc30058c4f5943cb217e9406635b43e42c7bbef0e33b55c15200eef0737817e36bcaa72054c9c61afaa8782cce5e5b61dc9f289170000000000000000000000000000000000000000000000000000000000000000000000000000000000005874d7",
+  "payload_hex": "8010494e4650a6556e8e0ecb43e4d14b25696d00e7f4b95ecb3657df1533f67e33975e960d5c0456dedb762c0ace12b1376e0863fe5afb5ec48bda52378e1937222261d41e37ee9251c62095de1b1dc30058c4f5943cb217e9406635b43e42c7bbef0e33b55c15200eef0737817e36bcaa72054c9c61afaa8782cce5e5b61dc9f28917",
+  "payload_sha256": "d919b57c41f4477cd950d6b613c74ac36f46c05096f69205d9dc4c6017a94db5",
+  "payload_classification": "crc_valid_nonclassic_or_encrypted",
+  "frame_header": {
+    "packet_length": 128,
+    "message_type": 16,
+    "byte_2": 73,
+    "received_dji_crc16_le": "0x1789",
+    "body_entropy_bits_per_byte": 6.517233482197934
+  },
+  "event_directory": "/home/drone/droneid-results/live-162835/20261104T083147.523753Z_5756500000_s11634558",
+  "event_time_utc": "2026-11-04T08:31:47.523+00:00",
+  "frequency_hz": 5756500000,
+  "frequency_mhz": 5756.5,
+  "root600_time_score": 0.9378074951098935,
+  "root147_time_score": 0.7402021382744842,
+  "dwell_source": "hackrf",
+  "dwell_average_power_dbfs": -35.59638879679171
+}
