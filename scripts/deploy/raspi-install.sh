@@ -37,11 +37,9 @@ if [ ! -f /opt/droneid-tools/remove_turbo_soft ]; then
      /opt/droneid-repo/tools/remove_turbo_soft.c -lturbofec
 fi
 
-echo "[4/8] bkerler Remote ID receiver (WiFi + BLE)..."
-[ -d /opt/droneid-receiver ] || git clone -q https://github.com/bkerler/DroneID /opt/droneid-receiver
-(cd /opt/droneid-receiver && git submodule update --init >/dev/null 2>&1 || true)
-pip3 install --break-system-packages -q scapy pyzmq fastapi "uvicorn[standard]" 2>/dev/null \
-  || pip3 install -q scapy pyzmq fastapi "uvicorn[standard]"
+echo "[4/8] Python packages for the dashboard and the C5 bridge..."
+pip3 install --break-system-packages -q numpy pyzmq fastapi "uvicorn[standard]" 2>/dev/null \
+  || pip3 install -q numpy pyzmq fastapi "uvicorn[standard]"
 
 echo "[5/8] Webapp deploy to /opt/watchtower-web..."
 mkdir -p /opt/watchtower-web/data
@@ -63,63 +61,24 @@ Restart=on-failure
 RestartSec=3
 [Install]
 WantedBy=multi-user.target"
-install_unit watchtower-remoteid "[Unit]
-Description=Remote ID WiFi receiver (ch 6)
+install_unit watchtower-c5-rid "[Unit]
+Description=ESP32-C5 Remote ID serial bridge
 After=network.target
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -u /opt/droneid-receiver/wifi_receiver.py --interface wlan0 -z
+User=root
+Group=dialout
+WorkingDirectory=/opt/watchtower-web/backend
+ExecStart=/usr/bin/python3 -u /opt/watchtower-web/backend/c5_rid_bridge.py
 Restart=always
-RestartSec=3
+RestartSec=2
 [Install]
 WantedBy=multi-user.target"
-install_unit watchtower-rid-beacon "[Unit]
-Description=DJI RID beacon decoder
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 -u /opt/watchtower-web/backend/rid_beacon.py
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target"
-install_unit watchtower-remoteid-ble "[Unit]
-Description=Remote ID BLE receiver (Sniffle)
-After=network.target
-[Service]
-Type=simple
-WorkingDirectory=/opt/droneid-receiver
-ExecStart=/usr/bin/python3 -u /opt/droneid-receiver/bluetooth_receiver.py -b 2000000 -s /dev/ttyUSB0 --zmqsetting 127.0.0.1:4222 -v
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target"
-cat > /etc/systemd/system/watchtower-remoteid-refresh.service <<'EOF'
-[Unit]
-Description=Restart Remote ID receiver (USB-bounce self-heal)
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/systemctl restart watchtower-remoteid.service
-EOF
-cat > /etc/systemd/system/watchtower-remoteid-refresh.timer <<'EOF'
-[Unit]
-Description=Periodic Remote ID receiver restart
-[Timer]
-OnCalendar=*:0/5
-Persistent=false
-[Install]
-WantedBy=timers.target
-EOF
 systemctl daemon-reload
-systemctl enable --now watchtower-web watchtower-remoteid watchtower-rid-beacon watchtower-remoteid-refresh.timer
-# BLE service starts only if a Sniffle dongle is present
-ls /dev/ttyUSB* >/dev/null 2>&1 && systemctl enable --now watchtower-remoteid-ble || \
-  echo "    (no serial dongle yet — BLE service installed but not started)"
+systemctl enable --now watchtower-web watchtower-c5-rid
 
 echo "[7/8] Device checks..."
 hackrf_info 2>/dev/null | head -4 || echo "    (no HackRF attached yet)"
-iw dev | head -4 || echo "    (no monitor-capable WiFi dongle yet)"
-ls /dev/ttyUSB* >/dev/null 2>&1 && echo "    serial dongle OK" || true
 
 echo "[8/8] Done."
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -131,7 +90,7 @@ cat <<EOF
  Station   : edit /opt/watchtower-web/backend/config.json
              (lat/lon + aircraft registry), then:
              systemctl restart watchtower-web
- Hardware  : plug HackRF + WiFi dongle (+ Sonoff/Sniffle on ttyUSB0)
+ Hardware  : plug HackRF + ESP32-C5 Remote ID + RTL-SDR + u-blox
              use a POWERED USB hub — HackRF is hungry
  Next      : arm the drone, open the dashboard, Start Scan
 ================================================================

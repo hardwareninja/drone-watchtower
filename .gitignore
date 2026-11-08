@@ -19,3 +19,8 @@ known_hosts
 *.cfile
 *.raw
 third_party/*/
+
+# ESP-IDF build output
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
