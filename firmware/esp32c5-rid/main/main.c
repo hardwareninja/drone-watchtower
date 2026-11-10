@@ -25,11 +25,26 @@ typedef struct {
     char serial[24];
     int32_t lat_e7;
     int32_t lon_e7;
+    int32_t op_lat_e7;
+    int32_t op_lon_e7;
     int8_t rssi;
     uint8_t channel;
     uint8_t mac[6];
     char via[8];
 } det_t;
+
+/* Last-seen state per MAC so a BT4 location advertisement (no serial in the
+ * same adv) can be joined with the Basic ID that arrives separately. */
+typedef struct {
+    uint8_t mac[6];
+    char serial[24];
+    int32_t lat_e7;
+    int32_t lon_e7;
+    TickType_t tick;
+} mac_slot_t;
+
+#define MAC_SLOTS 16
+static mac_slot_t mac_cache[MAC_SLOTS];
 
 static QueueHandle_t det_q;
 static volatile int ble_seen;
@@ -82,6 +97,8 @@ static bool parse_astm_pack(const uint8_t *pack, int len, det_t *out)
     bool got = false;
     out->lat_e7 = 0;
     out->lon_e7 = 0;
+    out->op_lat_e7 = 0;
+    out->op_lon_e7 = 0;
     for (int n = 0; n < count; n++) {
         const uint8_t *m = pack + 3 + n * size;
         uint8_t mtype = m[0] >> 4;
@@ -90,6 +107,10 @@ static bool parse_astm_pack(const uint8_t *pack, int len, det_t *out)
         } else if (mtype == 1 && size >= 13) {
             out->lat_e7 = le_i32(m + 5);
             out->lon_e7 = le_i32(m + 9);
+        } else if (mtype == 4 && size >= 10) {
+            /* System message: operator/pilot position at bytes 2..9. */
+            out->op_lat_e7 = le_i32(m + 2);
+            out->op_lon_e7 = le_i32(m + 6);
         }
     }
     return got;
@@ -186,9 +207,12 @@ static void printer_task(void *arg)
         memcpy(last_serial, d.serial, sizeof(last_serial));
         last_tick = now;
         printf("{\"src\":\"c5\",\"via\":\"%s\",\"serial\":\"%s\",\"lat\":%.7f,\"lon\":%.7f,"
+               "\"op_lat\":%.7f,\"op_lon\":%.7f,"
                "\"rssi\":%d,\"ch\":%u,\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"}\n",
                d.via[0] ? d.via : "wifi",
-               d.serial, d.lat_e7 / 1e7, d.lon_e7 / 1e7, d.rssi, d.channel,
+               d.serial, d.lat_e7 / 1e7, d.lon_e7 / 1e7,
+               d.op_lat_e7 / 1e7, d.op_lon_e7 / 1e7,
+               d.rssi, d.channel,
                d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
         fflush(stdout);
     }
@@ -207,14 +231,36 @@ static void stats_task(void *arg)
     }
 }
 
+static int mac_slot(const uint8_t *mac)
+{
+    int free_i = -1;
+    int oldest = 0;
+    TickType_t oldest_tick = mac_cache[0].tick;
+    for (int i = 0; i < MAC_SLOTS; i++) {
+        if (memcmp(mac_cache[i].mac, mac, 6) == 0) {
+            return i;
+        }
+        if (free_i < 0 && mac_cache[i].serial[0] == 0 && mac_cache[i].lat_e7 == 0) {
+            free_i = i;
+        }
+        if (mac_cache[i].tick < oldest_tick) {
+            oldest_tick = mac_cache[i].tick;
+            oldest = i;
+        }
+    }
+    return free_i >= 0 ? free_i : oldest;
+}
+
 /* ASTM F3411 Bluetooth 4 legacy: service-data UUID 0xFFFA, then a counter
- * and one 25-byte OpenDroneID message. Basic ID bytes 2..21 are the serial. */
-static void parse_odid(const uint8_t *msg, int len, int8_t rssi, const uint8_t *bda)
+ * and one 25-byte OpenDroneID message. Basic ID bytes 2..21 are the serial.
+ * Location adverts carry no serial, so positions are cached per MAC and
+ * joined when the Basic ID for that MAC arrives (either order). */
+static bool parse_odid(const uint8_t *msg, int len, int8_t rssi, const uint8_t *bda)
 {
     if (len < 25 || det_q == NULL) {
-        return;
+        return false;
     }
-    uint8_t mtype = (msg[0] >> 4) == 0 ? 0 : (msg[0] & 0x0f);
+    uint8_t mtype = msg[0] >> 4;
     det_t d = {0};
     memcpy(d.via, "bt4", 4);
     d.rssi = rssi;
@@ -222,27 +268,51 @@ static void parse_odid(const uint8_t *msg, int len, int8_t rssi, const uint8_t *
     if (bda) {
         memcpy(d.mac, bda, 6);
     }
+    int slot = bda ? mac_slot(bda) : -1;
     if (mtype == 0) {
         int n = 0;
         while (n < 20 && msg[2 + n] && msg[2 + n] != ' ') {
             char c = (char)msg[2 + n];
             if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) {
-                return;
+                return false;
             }
             n++;
         }
         if (n == 0 || n >= (int)sizeof(d.serial)) {
-            return;
+            return false;
         }
         memcpy(d.serial, msg + 2, n);
         d.serial[n] = 0;
-    } else if (mtype == 1) {
-        /* Location without a serial is not useful on its own. */
-        return;
-    } else {
-        return;
+        if (slot >= 0) {
+            memcpy(mac_cache[slot].serial, d.serial, sizeof(d.serial));
+            mac_cache[slot].tick = xTaskGetTickCount();
+            if (mac_cache[slot].lat_e7 || mac_cache[slot].lon_e7) {
+                d.lat_e7 = mac_cache[slot].lat_e7;
+                d.lon_e7 = mac_cache[slot].lon_e7;
+            }
+        }
+        xQueueSend(det_q, &d, 0);
+        return true;
     }
-    xQueueSend(det_q, &d, 0);
+    if (mtype == 1) {
+        int32_t lat = le_i32(msg + 5);
+        int32_t lon = le_i32(msg + 9);
+        if (slot < 0) {
+            return false;
+        }
+        mac_cache[slot].lat_e7 = lat;
+        mac_cache[slot].lon_e7 = lon;
+        mac_cache[slot].tick = xTaskGetTickCount();
+        if (mac_cache[slot].serial[0]) {
+            memcpy(d.serial, mac_cache[slot].serial, sizeof(d.serial));
+            d.lat_e7 = lat;
+            d.lon_e7 = lon;
+            xQueueSend(det_q, &d, 0);
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 static int is_odid_uuid(const uint8_t *data, int dlen)
@@ -266,10 +336,13 @@ static void parse_ble_adv(const uint8_t *adv, int len, int8_t rssi, const uint8_
         /* Service data 0x16, or manufacturer data 0xFF, carrying UUID 0xFFFA.
          * Some beacons omit the counter byte, so try both alignments. */
         /* UUID, a counter, then one more header byte, then the 25-byte
-         * message. data+3 folds that header byte into the serial
-         * ("123" becomes "1123"). */
+         * message. data+4 skips both; data+3 folds the header byte into the
+         * serial ("123" becomes "1123"), so it is only tried when +4 finds
+         * nothing at all. */
         if ((typ == 0x16 || typ == 0xFF) && is_odid_uuid(data, dlen) && dlen >= 4 + 25) {
-            parse_odid(data + 4, dlen - 4, rssi, bda);
+            if (!parse_odid(data + 4, dlen - 4, rssi, bda)) {
+                parse_odid(data + 3, dlen - 3, rssi, bda);
+            }
         }
         i += 1 + field;
     }

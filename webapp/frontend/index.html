@@ -50,6 +50,21 @@
 
     <section id="mapwrap">
       <div id="map"></div>
+      <div id="hist-controls" class="hidden">
+        <select id="hist-source" title="Protocol filter">
+          <option value="">All protocols</option>
+          <option value="remoteid">RemoteID</option>
+          <option value="droneid">DroneID</option>
+          <option value="elrs">ELRS</option>
+          <option value="mavlink">MAVLink</option>
+          <option value="vtx">VTX</option>
+        </select>
+        <input type="date" id="hist-from" title="From (UTC)">
+        <input type="date" id="hist-to" title="To (UTC)">
+        <button id="hist-map" class="ghost">Show map</button>
+        <button id="hist-export" class="ghost">Export CSV</button>
+        <button id="hist-more" class="ghost">Load more</button>
+      </div>
       <div id="history-table" class="hidden"></div>
       <div id="vtx-panel" class="hidden">
         <div class="vtx-head">

@@ -8,6 +8,7 @@ let station = null;
 let statusMode = null;
 let scanArmed = true;
 let gpsCentered = false;
+let mapSeeded = false;
 let selectedKey = null;
 const sessions = new Map(); // "rid:<serial>" | "djiid:<hash>" -> session
 const adsb = new Map(); // ICAO hex -> latest 1090 MHz track
@@ -17,6 +18,7 @@ let elrs = null;
 let tbs = null;
 let vtxLinks = [];
 let mavlink = [];
+let adsbError = null;
 
 function fmtTime(iso) {
   return iso ? iso.slice(11, 23) : "--";
@@ -57,6 +59,7 @@ function setStatus(st) {
   }
   statusMode = st.mode || null;
   scanArmed = st.armed !== false;
+  adsbError = st.adsb_error || null;
   station = st.station;
   const btn = $("btn-scan");
   btn.textContent = scanArmed ? "Stop scan" : "Start scan";
@@ -101,6 +104,10 @@ function setDongles(list) {
     el.classList.toggle("off", !d.attached);
     if (d.id === "gps") {
       if (!d.attached) el.title = "u-blox 7 · not attached";
+    } else if (d.id === "rtl" && d.attached && !live) {
+      el.title = adsbError
+        ? "RTL-SDR · attached · decoder error: " + adsbError
+        : "RTL-SDR · attached · no 1090 decoder running (see README)";
     } else if (!d.attached) {
       el.title = d.role + " · not attached";
     } else {
@@ -115,6 +122,7 @@ function sess(key, mode) {
       key, mode, source: key.startsWith("rid:") ? "remoteid" : "droneid",
       count: 0, infp: 0, cryp: 0, lastTime: null, bestRssi: -999,
       channels: new Map(), packets: [], trail: [],
+      pos: null, opLat: null, opLon: null, home: null, pclass: null,
     });
   }
   const s = sessions.get(key);
@@ -155,6 +163,15 @@ function onDetection(evt) {
   s.lastTime = evt.time;
   if (evt.rssi > s.bestRssi) s.bestRssi = evt.rssi;
   s.channels.set(evt.freq, (s.channels.get(evt.freq) || 0) + 1);
+  if (evt.pclass) s.pclass = evt.pclass;
+  // classic O2/O3 carries plaintext telemetry in the clear
+  if (hasFix(evt.lat, evt.lon)) {
+    s.pos = { lat: evt.lat, lon: evt.lon, alt: evt.alt, yaw: evt.yaw };
+    s.trail.push([evt.lat, evt.lon]);
+    if (s.trail.length > 300) s.trail.shift();
+  }
+  if (hasFix(evt.op_lat, evt.op_lon)) { s.opLat = evt.op_lat; s.opLon = evt.op_lon; }
+  if (evt.home_lat != null && evt.home_lon != null) s.home = { lat: evt.home_lat, lon: evt.home_lon };
   s.packets.unshift({ time: evt.time, freq: evt.freq, marker: evt.marker, rssi: evt.rssi });
   s.packets = s.packets.slice(0, 50);
   renderAll();
@@ -486,6 +503,7 @@ function renderSidebar() {
     const metaParts = [];
     if (rid) metaParts.push(`RID ${rid.count} fixes`);
     if (dj) metaParts.push(`DroneID ${dj.count} pkts (${dj.infp} INFP / ${dj.cryp} CRYP)`);
+    if (dj && dj.pos) metaParts.push("O2 plaintext position");
     const lastIso = rid && (!dj || tsec(rid.lastTime) > tsec(dj.lastTime)) ? rid.lastTime : dj.lastTime;
     metaParts.push(`last ${fmtTime(lastIso)}`);
     div.innerHTML = `
@@ -608,6 +626,10 @@ function placeStation() {
   if (station.source === "gps" && !gpsCentered) {
     map.setView(ll, Math.max(map.getZoom(), 15));
     gpsCentered = true;
+  } else if (!mapSeeded) {
+    // first status carries the configured station — drop the placeholder view
+    map.setView(ll, Math.max(map.getZoom(), 13));
+    mapSeeded = true;
   }
 }
 
@@ -634,24 +656,30 @@ function renderMap() {
     }).addTo(dotLayer).bindPopup(`<b>${p.marker}</b> · session ${latestDj.key.slice(6)}<br>${p.freq} MHz · ${p.rssi} dBFS`);
   }
   for (const s of sessions.values()) {
-    if (s.source !== "remoteid" || !s.pos || !hasFix(s.pos.lat, s.pos.lon)) continue;
+    if (!s.pos || !hasFix(s.pos.lat, s.pos.lon)) continue;
+    const ident = s.source === "remoteid" ? s.key.slice(4) : s.key.slice(6);
+    const via = s.source === "remoteid" ? "Remote ID" : "DroneID plaintext";
     if (!s.trailLine) {
       s.trailLine = L.polyline([], { color: "#d29922", weight: 2, opacity: 0.8 }).addTo(map);
       s.droneDot = L.circleMarker([s.pos.lat, s.pos.lon], {
         radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2,
-      }).addTo(map).bindTooltip("Drone — Remote ID");
-      if (s.opLat && s.opLon) {
+      }).addTo(map).bindTooltip("Drone — " + via);
+      map.fitBounds(L.latLngBounds([[s.pos.lat, s.pos.lon], [station.lat, station.lon]]).pad(0.3));
+    }
+    s.trailLine.setLatLngs(s.trail);
+    s.droneDot.setLatLng([s.pos.lat, s.pos.lon]);
+    s.droneDot.bindPopup(`<b>${ident}</b><br>${Number(s.pos.lat).toFixed(5)}, ${Number(s.pos.lon).toFixed(5)}` +
+      `<br>${s.pos.alt != null ? Number(s.pos.alt).toFixed(1) + " m" : ""}` +
+      (s.selfid ? `<br>${s.selfid}` : ""));
+    if (hasFix(s.opLat, s.opLon)) {
+      if (!s.opDot) {
         s.opDot = L.circleMarker([s.opLat, s.opLon], {
           radius: 6, color: "#3fb950", fillColor: "#3fb950", fillOpacity: 0.9, weight: 2,
         }).addTo(map).bindTooltip("Operator position");
         map.fitBounds(L.latLngBounds([[s.pos.lat, s.pos.lon], [s.opLat, s.opLon]]).pad(0.3));
       }
+      s.opDot.setLatLng([s.opLat, s.opLon]);
     }
-    s.trailLine.setLatLngs(s.trail);
-    s.droneDot.setLatLng([s.pos.lat, s.pos.lon]);
-    s.droneDot.bindPopup(`<b>${s.key.slice(4)}</b><br>${Number(s.pos.lat).toFixed(5)}, ${Number(s.pos.lon).toFixed(5)}` +
-      `<br>${Number(s.pos.alt).toFixed(1)} m${s.selfid ? `<br>${s.selfid}` : ""}`);
-    if (s.opDot && s.opLat) s.opDot.setLatLng([s.opLat, s.opLon]);
   }
   for (const v of mavlink) {
     if (v.lat == null || v.lon == null) continue;
@@ -685,7 +713,19 @@ function renderInfo() {
     kv.push(["DroneID packets", `${dj.count} (${dj.infp} INFP / ${dj.cryp} CRYP)`]);
     kv.push(["Channels", [...dj.channels.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c.toFixed(1)}×${n}`).join("  ")]);
     kv.push(["Best signal", dj.bestRssi > -900 ? dj.bestRssi.toFixed(1) + " dBFS" : "—"]);
-    kv.push(["O4 telemetry", "encrypted (AES-CTR)"]);
+    if (dj.pos) {
+      kv.push(["Position", `${Number(dj.pos.lat).toFixed(6)}, ${Number(dj.pos.lon).toFixed(6)}`]);
+      kv.push(["Telemetry", "O2/O3 plaintext (unencrypted)"]);
+      if (dj.pos.alt != null) kv.push(["Altitude", `${Number(dj.pos.alt).toFixed(1)} m`]);
+      if (dj.pos.yaw != null) kv.push(["Yaw", `${Number(dj.pos.yaw).toFixed(1)}°`]);
+      if (dj.home) kv.push(["Home point", `${Number(dj.home.lat).toFixed(6)}, ${Number(dj.home.lon).toFixed(6)}`]);
+      if (!rid || !rid.opLat) {
+        kv.push(["Operator position", dj.opLat
+          ? `${Number(dj.opLat).toFixed(6)}, ${Number(dj.opLon).toFixed(6)}` : "—"]);
+      }
+    } else {
+      kv.push(["O4 telemetry", "encrypted (AES-CTR)"]);
+    }
   }
   if (rid) {
     kv.push(["Remote ID", "decoded (F3411 beacon)"]);
@@ -717,6 +757,25 @@ let view = "live";
 let historySessions = [];
 let historyLayer = null;
 let selectedHistory = null;
+let histOffset = 0;
+let histEvents = [];
+let histMapOn = false;
+const HIST_PAGE = 500;
+
+function histQuery(paged) {
+  const p = new URLSearchParams();
+  const src = $("hist-source").value;
+  const from = $("hist-from").value;
+  const to = $("hist-to").value;
+  if (src) p.set("source", src);
+  if (from) p.set("frm", from);
+  if (to) p.set("to", to);
+  if (paged) {
+    p.set("limit", HIST_PAGE);
+    p.set("offset", histOffset);
+  }
+  return p.toString();
+}
 
 function switchView(v) {
   view = v;
@@ -725,13 +784,18 @@ function switchView(v) {
   const showMap = v === "live";
   $("map").classList.toggle("hidden", !showMap);
   $("history-table").classList.toggle("hidden", showMap);
+  $("hist-controls").classList.toggle("hidden", v !== "history");
   document.querySelector("main").classList.toggle("hist", v === "history");
   $("infopanel").classList.toggle("hidden", v === "history");
   if (v === "history") {
     $("side-head-label").textContent = "Drone history";
     selectedHistory = null;
+    histMapOn = false;
+    $("hist-map").textContent = "Show map";
     loadHistory();
   } else {
+    histMapOn = false;
+    $("hist-map").textContent = "Show map";
     $("side-head-label").textContent = "Drone detection";
     if (historyLayer) { historyLayer.remove(); historyLayer = null; }
     if (map) map.invalidateSize();
@@ -745,8 +809,11 @@ function switchView(v) {
 async function loadHistory() {
   historySessions = await (await fetch("/api/history/sessions?limit=100")).json();
   renderHistoryList();
-  const evs = await (await fetch("/api/history/events?limit=500")).json();
+  histOffset = 0;
+  const evs = await (await fetch("/api/history/events?" + histQuery(true))).json();
+  histEvents = evs;
   renderHistoryTable(evs, "All events");
+  $("hist-more").disabled = evs.length < HIST_PAGE;
 }
 
 function renderHistoryList() {
@@ -800,7 +867,9 @@ function renderHistoryTable(evs, title) {
 
 async function showHistoryDetail(h) {
   const evs = await (await fetch(`/api/history/events?session=${encodeURIComponent(h.session)}&limit=500`)).json();
+  histEvents = evs;
   renderHistoryTable(evs, `Session ${h.session}`);
+  if (histMapOn && map) drawHistoryMap(evs);
   $("info-empty").classList.add("hidden");
   $("info-body").classList.remove("hidden");
   const rid = (h.sources || "").includes("remoteid");
@@ -844,7 +913,9 @@ function drawHistoryMap(evs) {
   const stationPts = evs.filter((e) => !e.lat && !e.lon);
   for (const e of stationPts.slice(0, 60)) {
     if (!station) break;
-    L.circleMarker([station.lat + jitter(), station.lon + jitter()], {
+    const slat = e.station_lat != null ? e.station_lat : station.lat;
+    const slon = e.station_lon != null ? e.station_lon : station.lon;
+    L.circleMarker([slat + jitter(), slon + jitter()], {
       radius: e.marker === "CRYP" ? 5 : 3.2,
       color: e.marker === "CRYP" ? "#d29922" : "#f85149",
       fillColor: e.marker === "CRYP" ? "#d29922" : "#f85149",
@@ -904,6 +975,29 @@ function init() {
   window.addEventListener("mouseup", () => { dragState = null; resizeState = null; });
   $("tab-monitor").onclick = () => switchView("live");
   $("tab-history").onclick = () => switchView("history");
+  $("hist-more").onclick = async () => {
+    histOffset += HIST_PAGE;
+    const more = await (await fetch("/api/history/events?" + histQuery(true))).json();
+    histEvents = histEvents.concat(more);
+    renderHistoryTable(histEvents, "All events");
+    $("hist-more").disabled = more.length < HIST_PAGE;
+  };
+  $("hist-export").onclick = () => {
+    window.open("/api/history/export?" + histQuery(false), "_blank");
+  };
+  $("hist-map").onclick = () => {
+    histMapOn = !histMapOn;
+    $("hist-map").textContent = histMapOn ? "Show table" : "Show map";
+    $("map").classList.toggle("hidden", !histMapOn);
+    $("history-table").classList.toggle("hidden", histMapOn);
+    if (histMapOn) {
+      if (map) map.invalidateSize();
+      drawHistoryMap(histEvents);
+    }
+  };
+  for (const id of ["hist-source", "hist-from", "hist-to"]) {
+    $(id).addEventListener("change", loadHistory);
+  }
   setInterval(expireLive, 1000);
   connect();
 }

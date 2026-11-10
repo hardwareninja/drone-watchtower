@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import datetime
 import io
 import json
@@ -39,6 +40,7 @@ except ImportError:
     HAVE_CV2 = False
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 try:
@@ -47,7 +49,12 @@ try:
 except ImportError:
     HAVE_ZMQ = False
 
-REMOTEID_ZMQ = ["tcp://127.0.0.1:4226"]  # ESP32-C5: Wi-Fi beacons and BLE Remote ID
+REMOTEID_ZMQ = [
+    "tcp://127.0.0.1:4226",  # ESP32-C5 bridge: Wi-Fi beacons and BLE Remote ID
+    "tcp://127.0.0.1:4225",  # rid_beacon.py: Wi-Fi monitor RID decoder
+    "tcp://127.0.0.1:4223",  # bkerler Wi-Fi receiver (macdb format)
+    "tcp://127.0.0.1:4222",  # Sniffle BLE receiver (macdb format)
+]
 ADSB_URL = "http://127.0.0.1:8091/api/aircraft"  # ADSB1090, behind the map proxy on :8090
 
 try:
@@ -103,7 +110,8 @@ def parse_line(line: str) -> dict | None:
     try:
         j = json.loads(line)
         p = bytes.fromhex(j["payload_hex"])
-        return {
+        classification = j.get("payload_classification")
+        evt = {
             "time": j["event_time_utc"],
             "freq": j["frequency_mhz"],
             "marker": p[2:6].decode("ascii", "replace"),
@@ -112,7 +120,29 @@ def parse_line(line: str) -> dict | None:
             "crc": bool(j.get("crc24a_ok") and j.get("dji_crc16_ok")),
             "sha": (j.get("payload_sha256") or "")[:12],
             "mode": state["mode"],
+            "pclass": classification,
         }
+        drone = j.get("drone_id")
+        if isinstance(drone, dict):
+            # classic O2/O3 carries plaintext telemetry: use the real serial
+            # as the session so it can line up with a Remote ID later
+            serial = str(drone.get("serial") or "").strip()
+            if classification == "classic_o2_plaintext" and serial:
+                evt["session"] = serial
+                evt["marker"] = "O2PT"
+            lat, lon = drone.get("latitude"), drone.get("longitude")
+            if lat and lon:  # 0,0 means invalid per the spec
+                evt["lat"] = lat
+                evt["lon"] = lon
+                evt["alt"] = drone.get("altitude")
+                evt["yaw"] = drone.get("yaw_degrees")
+                if drone.get("pilot_latitude") and drone.get("pilot_longitude"):
+                    evt["op_lat"] = drone["pilot_latitude"]
+                    evt["op_lon"] = drone["pilot_longitude"]
+                if drone.get("home_latitude") and drone.get("home_longitude"):
+                    evt["home_lat"] = drone["home_latitude"]
+                    evt["home_lon"] = drone["home_longitude"]
+        return evt
     except (json.JSONDecodeError, KeyError, ValueError):
         return None
 
@@ -127,15 +157,69 @@ def db_conn() -> sqlite3.Connection:
     return conn
 
 
+BEATS: dict[str, float] = {}
+
+
+def beat(name: str) -> None:
+    BEATS[name] = time.time()
+
+
+def retention_days() -> int:
+    try:
+        return max(1, int(CONFIG.get("retention_days", 90)))
+    except (TypeError, ValueError):
+        return 90
+
+
+def retention_loop() -> None:
+    """Prune events older than the configured window, whole days at a time."""
+    while True:
+        beat("retention")
+        try:
+            cutoff = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(days=retention_days())
+            ).isoformat(timespec="seconds")
+            with db_conn() as c:
+                cur = c.execute("DELETE FROM events WHERE time < ?", (cutoff,))
+                if cur.rowcount:
+                    print(f"retention: pruned {cur.rowcount} events before {cutoff}",
+                          flush=True)
+        except sqlite3.Error as e:
+            print(f"retention failed: {e}", flush=True)
+        for _ in range(60):  # minute slices so /api/health sees a live thread
+            time.sleep(60)
+            beat("retention")
+
+
+EVENT_COLS = (
+    "time", "session", "source", "marker", "freq", "rssi",
+    "lat", "lon", "alt", "crc",
+    "op_lat", "op_lon", "home_lat", "home_lon", "yaw", "pclass",
+    "station_lat", "station_lon",
+)
+
+EXTRA_COLS = (("op_lat", "REAL"), ("op_lon", "REAL"),
+              ("home_lat", "REAL"), ("home_lon", "REAL"),
+              ("yaw", "REAL"), ("pclass", "TEXT"),
+              ("station_lat", "REAL"), ("station_lon", "REAL"))
+
+
 def insert_event(evt: dict) -> None:
+    row = {k: evt.get(k) for k in EVENT_COLS}
+    # a position-less event still needs to know where the station was, so the
+    # history map can place it correctly after the station moves on GPS
+    if not row.get("lat") and not row.get("lon"):
+        gps = state.get("gps") or {}
+        if gps.get("lat") is not None and gps.get("lon") is not None:
+            row["station_lat"] = gps["lat"]
+            row["station_lon"] = gps["lon"]
     try:
         with db_conn() as c:
             c.execute(
-                "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (evt.get("time"), evt.get("session"), evt.get("source"),
-                 evt.get("marker"), evt.get("freq"), evt.get("rssi"),
-                 evt.get("lat"), evt.get("lon"), evt.get("alt"),
-                 1 if evt.get("crc") else 0),
+                f"INSERT INTO events ({','.join(EVENT_COLS)}) VALUES "
+                f"({','.join('?' * len(EVENT_COLS))})",
+                tuple(row[k] for k in EVENT_COLS),
             )
     except sqlite3.Error as e:  # storage must never break detection
         print(f"history insert failed: {e}", flush=True)
@@ -148,6 +232,11 @@ def init_db() -> None:
                 time TEXT, session TEXT, source TEXT, marker TEXT,
                 freq REAL, rssi REAL, lat REAL, lon REAL, alt REAL, crc INTEGER)"""
         )
+        for col, typ in EXTRA_COLS:
+            try:
+                c.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         c.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(time)")
     marker = DB.parent / ".imported"
@@ -177,7 +266,25 @@ def broadcast(msg: dict) -> None:
         asyncio.run_coroutine_threadsafe(ws.send_text(data), loop)
 
 
+_rid_seen: dict[tuple[str, str], float] = {}
+
+
+def _rid_dup(evt: dict) -> bool:
+    """The same serial in the same second from two receivers is one beacon."""
+    key = (str(evt.get("session") or ""), str(evt.get("time") or "")[:19])
+    now = time.time()
+    if key in _rid_seen:
+        return True
+    _rid_seen[key] = now
+    if len(_rid_seen) > 4096:
+        for k in [k for k, t in _rid_seen.items() if t < now - 10]:
+            _rid_seen.pop(k, None)
+    return False
+
+
 def publish_event(evt: dict) -> None:
+    if evt.get("source") == "remoteid" and _rid_dup(evt):
+        return
     with lock:
         state["events"] += 1
     if evt.get("source") == "remoteid":
@@ -214,17 +321,20 @@ def station_dict() -> dict:
 
 
 def status_dict() -> dict:
+    started = state.get("started")
     return {
         "running": state["running"],
         "armed": state.get("armed", True),
         "mode": state["mode"],
         "events": state["events"],
-        "started": state["started"],
+        "started": started,
+        "uptime_s": round(time.time() - started, 1) if started else None,
         "phase": state.get("phase"),
         "station": station_dict(),
         "gps": public_gps(),
         "dongles": dongle_status(),
         "internet": state.get("internet"),
+        "adsb_error": state.get("adsb_error"),
         "build": BUILD,
     }
 
@@ -259,12 +369,24 @@ def usb_devices() -> list[dict]:
     return found
 
 
+def dongle_specs() -> list[dict]:
+    """The dongle list with roles overridden by config.json's hackrf_roles."""
+    specs = [dict(s) for s in DONGLE_SPECS]
+    roles = CONFIG.get("hackrf_roles")
+    if isinstance(roles, dict):
+        for s in specs:
+            serial = s.get("serial")
+            if serial and serial in roles:
+                s["role"] = roles[serial]
+    return specs
+
+
 def dongle_status() -> list[dict]:
     present = usb_devices()
     gps = state.get("gps") or {}
     c5_tty = usb_acm_port("303a", "1001")
     out = []
-    for spec in DONGLE_SPECS:
+    for spec in dongle_specs():
         attached = False
         for dev in present:
             if spec.get("serial") and dev["serial"] == spec["serial"].lower():
@@ -360,6 +482,7 @@ def gps_loop() -> None:
     buf = b""
     last_sent = None
     while True:
+        beat("gps")
         path = gps_port()
         if path != port:
             if fd is not None:
@@ -436,17 +559,21 @@ def dongle_loop() -> None:
     """Tell the page when a radio is plugged in or unplugged, and when the link drops."""
     last = None
     last_net = None
+    last_err = None
     next_net = 0.0
     while True:
+        beat("dongles")
         current = dongle_status()
         now = time.time()
         if now >= next_net:
             state["internet"] = internet_up()
             next_net = now + 5
         net = state.get("internet")
-        if current != last or net != last_net:
+        err = state.get("adsb_error")
+        if current != last or net != last_net or err != last_err:
             last = current
             last_net = net
+            last_err = err
             broadcast({"type": "status", "status": status_dict()})
         time.sleep(2)
 
@@ -496,6 +623,8 @@ def tail_loop() -> None:
 def scan_start() -> dict:
     """Resume DroneID on the Pro and ELRS/TBS on the One."""
     state["armed"] = True
+    if not state.get("started"):
+        state["started"] = time.time()
     broadcast({"type": "status", "status": status_dict()})
     return {"ok": True}
 
@@ -510,6 +639,24 @@ def scan_stop() -> dict:
 @app.get("/api/status")
 def status() -> dict:
     return status_dict()
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """Liveness of every background loop plus storage and radio state."""
+    now = time.time()
+    beats = {k: round(now - v, 1) for k, v in sorted(BEATS.items())}
+    try:
+        db_bytes = DB.stat().st_size
+    except OSError:
+        db_bytes = 0
+    return {
+        "ok": max(beats.values(), default=0) < 60,
+        "beats": beats,
+        "db_bytes": db_bytes,
+        "dongles": dongle_status(),
+        "internet": state.get("internet"),
+    }
 
 
 @app.get("/api/history/sessions")
@@ -558,19 +705,65 @@ def history_sessions(limit: int = 100) -> list:
     return result
 
 
+def _history_where(session: str, source: str, frm: str, to: str) -> tuple[str, list]:
+    q, args = "SELECT * FROM events WHERE 1=1", []
+    if session:
+        q += " AND session=?"
+        args.append(session)
+    if source:
+        q += " AND source=?"
+        args.append(source)
+    if frm:  # ISO date or datetime, lexicographic compare works on our stamps
+        q += " AND time>=?"
+        args.append(frm if "T" in frm else frm + "T00:00:00")
+    if to:
+        q += " AND time<=?"
+        args.append(to if "T" in to else to + "T23:59:59.999999")
+    return q, args
+
+
 @app.get("/api/history/events")
-def history_events(session: str = "", limit: int = 500) -> list:
+def history_events(session: str = "", limit: int = 500, offset: int = 0,
+                   source: str = "", frm: str = "", to: str = "") -> list:
+    q, args = _history_where(session, source, frm, to)
+    q += " ORDER BY time DESC LIMIT ? OFFSET ?"
+    args += [limit, offset]
     with db_conn() as c:
-        if session:
-            rows = c.execute(
-                "SELECT * FROM events WHERE session=? ORDER BY time DESC LIMIT ?",
-                (session, limit),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT * FROM events ORDER BY time DESC LIMIT ?", (limit,),
-            ).fetchall()
+        rows = c.execute(q, args).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/history/export")
+def history_export(session: str = "", source: str = "", frm: str = "",
+                   to: str = "") -> StreamingResponse:
+    """Stream the filtered event history as CSV, row by row."""
+    q, args = _history_where(session, source, frm, to)
+    q += " ORDER BY time DESC"
+
+    def rows():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(EVENT_COLS)
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        with db_conn() as c:
+            cursor = c.execute(q, args)
+            while True:
+                batch = cursor.fetchmany(500)
+                if not batch:
+                    break
+                for r in batch:
+                    w.writerow([r[k] for k in EVENT_COLS])
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+
+    return StreamingResponse(
+        rows(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=watchtower-events.csv"},
+    )
 
 
 @app.websocket("/ws")
@@ -640,7 +833,8 @@ def remoteid_event(drone: list) -> dict | None:
 
 def adsb_snapshot() -> list[dict]:
     """One poll of the local 1090 MHz receiver. Positions only."""
-    with urllib.request.urlopen(ADSB_URL, timeout=4) as resp:
+    url = CONFIG.get("adsb_url") or ADSB_URL
+    with urllib.request.urlopen(url, timeout=4) as resp:
         data = json.loads(resp.read().decode())
     craft = []
     for a in data.get("aircraft") or []:
@@ -882,6 +1076,7 @@ def mavlink_udp_loop() -> None:
         return
     last_emit = 0.0
     while True:
+        beat("mavlink_udp")
         ready, _, _ = select.select(socks, [], [], 1.0)
         changed = False
         for sock in ready:
@@ -938,6 +1133,7 @@ def remember(link: dict, last: dict | None, last_at: float, hold: float = 20.0) 
 def droneid_loop() -> None:
     """HackRF Pro stays on the 2.4 and 5.8 GHz DroneID rasters."""
     while True:
+        beat("droneid")
         if not state.get("armed"):
             time.sleep(0.3)
             continue
@@ -950,15 +1146,25 @@ def droneid_loop() -> None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         out = RESULTS / f"cycle-{ts}"
         out.mkdir(parents=True, exist_ok=True)
+        band = str(CONFIG.get("scanner_band") or "both")
+        preset = str(CONFIG.get("scanner_preset") or "baseline")
         cmd = [
             "python3", SCANNER,
-            "--band", "both", "--preset", "baseline", "--cycles", "0",
+            "--band", band, "--preset", preset, "--cycles", "0",
             "--lna", "32", "--vga", "24",
             "--serial", HACKRF_DRONEID,
             "--libhackrf", LIBHACKRF,
             "--turbo-binary", TURBO,
             "--output", str(out),
         ]
+        freqs = CONFIG.get("scanner_freqs")
+        if isinstance(freqs, list) and freqs:
+            cmd += ["--freqs", ",".join(str(f) for f in freqs)]
+        elif isinstance(freqs, str) and freqs.strip():
+            cmd += ["--freqs", freqs.strip()]
+        dwell = CONFIG.get("scanner_dwell")
+        if dwell:
+            cmd += ["--dwell", str(dwell)]
         state.update(running=True, mode="live", phase_droneid="DroneID", run_dir=out)
         refresh_phase()
         log = open(out / "scanner.log", "w")
@@ -967,6 +1173,7 @@ def droneid_loop() -> None:
         seen = 0
         path = out / "detections.jsonl"
         while proc.poll() is None and state.get("armed"):
+            beat("droneid")
             if path.exists():
                 lines = path.read_text().splitlines()
                 for line in lines[seen:]:
@@ -1098,6 +1305,7 @@ def usb_cam_loop() -> None:
     if not HAVE_CV2:
         return
     while True:
+        beat("vtx_video")
         index = usb_locate.uvc_index()
         if index is None:
             time.sleep(2)
@@ -1146,6 +1354,7 @@ def hop_loop() -> None:
     last_tbs_at = 0.0
     vtx_last: dict[str, tuple[dict, float]] = {}
     while True:
+        beat("hop")
         if not state.get("armed"):
             if state.get("phase_hop"):
                 state["phase_hop"] = None
@@ -1154,24 +1363,28 @@ def hop_loop() -> None:
             continue
         state["phase_hop"] = "ELRS"
         refresh_phase()
+        beat("hop")
         shown, last_elrs, last_elrs_at = remember(elrs_demod_pass(), last_elrs, last_elrs_at, 120)
         if not state.get("armed"):
             continue
         broadcast({"type": "elrs", "link": shown})
         state["phase_hop"] = "TBS"
         refresh_phase()
+        beat("hop")
         shown, last_tbs, last_tbs_at = remember(tbs_survey(), last_tbs, last_tbs_at, 60)
         if not state.get("armed"):
             continue
         broadcast({"type": "tbs", "link": shown})
         state["phase_hop"] = "MAVLink"
         refresh_phase()
+        beat("hop")
         vehicles = mavlink_rf_pass()
         if not state.get("armed"):
             continue
         broadcast({"type": "mavlink", "vehicles": vehicles})
         state["phase_hop"] = "VTX"
         refresh_phase()
+        beat("hop")
         found = vtx_survey()
         now = time.time()
         for l in found:
@@ -1204,11 +1417,14 @@ def hop_loop() -> None:
 def adsb_loop() -> None:
     """Push the 1090 MHz picture to the dashboard. Failures just wait and retry."""
     while True:
+        beat("adsb")
         try:
             craft = adsb_snapshot()
             state["adsb_ok"] = True
-        except Exception:
+            state["adsb_error"] = None
+        except Exception as exc:
             state["adsb_ok"] = False
+            state["adsb_error"] = str(exc)
             time.sleep(5)
             continue
         broadcast({"type": "adsb", "aircraft": craft})
@@ -1218,14 +1434,20 @@ def adsb_loop() -> None:
 def remoteid_loop(endpoint: str) -> None:
     if not HAVE_ZMQ:
         return
+    name = "rid:" + endpoint.rsplit(":", 1)[-1]
     ctx = zmq.Context.instance()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt_string(zmq.SUBSCRIBE, "")
+    sub.setsockopt(zmq.RCVTIMEO, 15000)  # raise instead of blocking forever
     sub.connect(endpoint)
     while True:
+        beat(name)
         try:
-            raw = sub.recv_string()
-            data = json.loads(raw)
+            msg = sub.recv_string()
+        except zmq.Again:
+            continue
+        try:
+            data = json.loads(msg)
             if isinstance(data, dict) and "watchtower_event" in data:
                 publish_event(data["watchtower_event"])
                 continue
@@ -1249,7 +1471,9 @@ def startup() -> None:
     threading.Thread(target=droneid_loop, daemon=True).start()
     threading.Thread(target=hop_loop, daemon=True).start()
     threading.Thread(target=mavlink_udp_loop, daemon=True).start()
-    for endpoint in REMOTEID_ZMQ:
+    threading.Thread(target=retention_loop, daemon=True).start()
+    endpoints = CONFIG.get("remoteid_zmq") or REMOTEID_ZMQ
+    for endpoint in endpoints:
         threading.Thread(target=remoteid_loop, args=(endpoint,), daemon=True).start()
 
 

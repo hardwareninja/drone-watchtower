@@ -3,9 +3,12 @@
 set -euo pipefail
 
 DEST=/opt/watchtower-web
-rm -rf "$DEST"
+# Replace only the code; data/ holds history.db and must survive a deploy.
 mkdir -p "$DEST"
+rm -rf "$DEST/backend" "$DEST/frontend"
 cp -r /tmp/deploy-webapp/backend /tmp/deploy-webapp/frontend "$DEST/"
+mkdir -p "$DEST/data"
+chown -R drone:drone "$DEST"
 
 echo "[*] Installing Python deps..."
 pip3 install --break-system-packages -q fastapi "uvicorn[standard]"

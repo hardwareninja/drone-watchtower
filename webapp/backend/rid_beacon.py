@@ -54,10 +54,11 @@ def _uas_id(raw: bytes) -> str:
     return ""
 
 
-def event_from_id(serial: str, mac: str, lat: float, lon: float, status: str) -> dict | None:
+def event_from_id(serial: str, mac: str, lat: float, lon: float, status: str,
+                  rssi: int = 0, op_lat: float = 0.0, op_lon: float = 0.0) -> dict | None:
     if not serial:
         return None
-    return {
+    evt = {
         "source": "remoteid",
         "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         + f".{int(time.time() * 1000) % 1000:03d}+00:00",
@@ -66,24 +67,33 @@ def event_from_id(serial: str, mac: str, lat: float, lon: float, status: str) ->
         "mac": mac,
         "crc": True,
         "freq": tune["mhz"],
-        "rssi": 0,
+        "rssi": rssi,
         "lat": lat,
         "lon": lon,
         "alt": 0.0,
         "speed": 0,
         "status": status,
     }
+    if op_lat or op_lon:
+        evt["op_lat"] = op_lat
+        evt["op_lon"] = op_lon
+    return evt
 
 
-def event_from_tlv(tlvs: dict, mac: str) -> dict | None:
+def event_from_tlv(tlvs: dict, mac: str, rssi: int = 0) -> dict | None:
     serial = _uas_id(tlvs.get(3, b""))
     lat = struct.unpack(">i", tlvs[4])[0] / 1e7 if 4 in tlvs and len(tlvs[4]) == 4 else 0.0
     lon = struct.unpack(">i", tlvs[5])[0] / 1e7 if 5 in tlvs and len(tlvs[5]) == 4 else 0.0
-    return event_from_id(serial, mac, lat, lon, "dji beacon")
+    return event_from_id(serial, mac, lat, lon, "dji beacon", rssi)
 
 
-def event_from_astm(pack: bytes, mac: str) -> dict | None:
-    """OpenDroneID Wi-Fi message pack: type/size/count, then fixed-size messages."""
+def event_from_astm(pack: bytes, mac: str, rssi: int = 0) -> dict | None:
+    """OpenDroneID Wi-Fi message pack: type/size/count, then fixed-size messages.
+
+    Message 0 = Basic ID (serial), 1 = Location (drone position), 4 = System
+    (operator/pilot position). Layouts per opendroneid-core-c ODID_*_encoded:
+    Location lat/lon at bytes 5/9, System operator lat/lon at bytes 2/6.
+    """
     if len(pack) < 3 + 25:
         return None
     size, count = pack[1], pack[2]
@@ -91,7 +101,7 @@ def event_from_astm(pack: bytes, mac: str) -> dict | None:
         return None
     if 3 + count * size > len(pack):
         return None
-    serial, lat, lon = "", 0.0, 0.0
+    serial, lat, lon, op_lat, op_lon = "", 0.0, 0.0, 0.0, 0.0
     for n in range(count):
         msg = pack[3 + n * size:3 + (n + 1) * size]
         mtype = msg[0] >> 4
@@ -100,15 +110,22 @@ def event_from_astm(pack: bytes, mac: str) -> dict | None:
         elif mtype == 1 and len(msg) >= 13:
             lat = struct.unpack_from("<i", msg, 5)[0] / 1e7
             lon = struct.unpack_from("<i", msg, 9)[0] / 1e7
-    return event_from_id(serial, mac, lat, lon, "astm beacon")
+        elif mtype == 4 and len(msg) >= 10:
+            op_lat = struct.unpack_from("<i", msg, 2)[0] / 1e7
+            op_lon = struct.unpack_from("<i", msg, 6)[0] / 1e7
+    return event_from_id(serial, mac, lat, lon, "astm beacon", rssi, op_lat, op_lon)
 
 
 def publish(evt: dict | None) -> None:
     if not evt:
         return
     pub.send_string(json.dumps({"watchtower_event": evt}))
+    extra = ""
+    if evt.get("op_lat") or evt.get("op_lon"):
+        extra = f" op=({evt['op_lat']:.6f},{evt['op_lon']:.6f})"
     print(f"[{evt['time']}] {evt['status']} {evt['session']} "
-          f"@ ({evt['lat']:.6f},{evt['lon']:.6f}) {evt['freq']:.0f} MHz", flush=True)
+          f"@ ({evt['lat']:.6f},{evt['lon']:.6f}) rssi={evt['rssi']} "
+          f"{evt['freq']:.0f} MHz{extra}", flush=True)
 
 
 def handle(pkt) -> None:
@@ -117,13 +134,14 @@ def handle(pkt) -> None:
     d = pkt[Dot11]
     raw = bytes(pkt)
     mac = d.addr2 or ""
+    rssi = int(getattr(pkt, "dBm_AntSignal", 0) or 0)
     i = raw.find(DJI_OUI)
     if i >= 0:
-        publish(event_from_tlv(parse_tlv_stream(raw[i + 7:]), mac))
+        publish(event_from_tlv(parse_tlv_stream(raw[i + 7:]), mac, rssi))
         return
     j = raw.find(ASTM_OUI)
     if j >= 0:
-        publish(event_from_astm(raw[j + 4:], mac))
+        publish(event_from_astm(raw[j + 4:], mac, rssi))
 
 
 def hop_channels() -> None:
@@ -148,10 +166,18 @@ def wait_iface() -> str:
         time.sleep(5)
 
 
+def ensure_monitor(iface: str) -> None:
+    """Put the dongle in monitor mode; it may already be there."""
+    subprocess.run(["iw", "dev", iface, "set", "type", "monitor"],
+                   capture_output=True)
+    subprocess.run(["ip", "link", "set", iface, "up"], capture_output=True)
+
+
 if __name__ == "__main__":
     threading.Thread(target=hop_channels, daemon=True).start()
     while True:
         radio["iface"] = wait_iface()
+        ensure_monitor(radio["iface"])
         print(f"RID beacon decoder: {radio['iface']} ASTM + DJI, hopping channels 1/6/11",
               flush=True)
         try:

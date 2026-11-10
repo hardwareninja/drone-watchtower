@@ -69,6 +69,9 @@ def publish(obj: dict) -> None:
         "speed": 0,
         "status": status,
     }
+    if obj.get("op_lat") or obj.get("op_lon"):
+        evt["op_lat"] = float(obj.get("op_lat") or 0)
+        evt["op_lon"] = float(obj.get("op_lon") or 0)
     pub.send_string(json.dumps({"watchtower_event": evt}))
     print(f"[{evt['time']}] {serial} ch{ch} rssi={evt['rssi']} ({evt['lat']:.6f},{evt['lon']:.6f})", flush=True)
 

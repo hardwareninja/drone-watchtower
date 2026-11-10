@@ -98,8 +98,20 @@ aside { background: var(--panel); border-right: 1px solid var(--border); display
 .alert .meta { color: var(--dim); font-size: 11px; margin-top: 3px; }
 .alert .meta b { color: var(--text); }
 
-#mapwrap { min-width: 0; min-height: 0; }
+#mapwrap { min-width: 0; min-height: 0; position: relative; }
 #map { width: 100%; height: 100%; background: #000; }
+#hist-controls {
+  position: absolute; top: 8px; left: 8px; z-index: 1000;
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  background: rgba(22,27,34,.92); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 8px;
+}
+#hist-controls.hidden { display: none; }
+#hist-controls select, #hist-controls input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 6px; font-size: 12px;
+}
+#hist-controls button { padding: 4px 10px; font-size: 12px; }
 #history-table { width: 100%; height: 100%; overflow-y: auto; background: var(--bg); }
 #history-table .ht-title { padding: 10px 14px; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 2; }
 #history-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -144,3 +156,12 @@ aside { background: var(--panel); border-right: 1px solid var(--border); display
 #pkt-table th { text-align: left; color: var(--dim); padding: 4px 12px; font-weight: 500; }
 #pkt-table td { padding: 4px 12px; border-top: 1px solid var(--border); }
 #pkt-table .cryp { color: var(--warn); font-weight: 600; }
+
+@media (max-width: 900px) {
+  main, main.hist { grid-template-columns: 1fr; }
+  #sidebar { max-height: 38vh; }
+  #infopanel { max-height: 38vh; border-left: 0; border-top: 1px solid var(--border); }
+  #topbar { flex-wrap: wrap; gap: 8px; }
+  .tabs { order: 3; flex-basis: 100%; }
+  #hist-controls { max-width: calc(100% - 16px); }
+}

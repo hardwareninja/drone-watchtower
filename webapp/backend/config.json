@@ -6,5 +6,21 @@
   },
   "aircraft": {
     "1581F6W8B2448002008T": "DJI Avata 2"
+  },
+  "retention_days": 90,
+  "scanner_band": "both",
+  "scanner_preset": "baseline",
+  "scanner_freqs": [],
+  "scanner_dwell": 0.8,
+  "adsb_url": "http://127.0.0.1:8091/api/aircraft",
+  "remoteid_zmq": [
+    "tcp://127.0.0.1:4226",
+    "tcp://127.0.0.1:4225",
+    "tcp://127.0.0.1:4223",
+    "tcp://127.0.0.1:4222"
+  ],
+  "hackrf_roles": {
+    "0000000000000000147865de331550df": "DroneID",
+    "0000000000000000a06063c82451835f": "ELRS 2.4"
   }
 }

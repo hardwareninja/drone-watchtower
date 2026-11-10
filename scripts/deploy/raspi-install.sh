@@ -19,6 +19,7 @@ apt-get install -y --no-install-recommends \
   git build-essential autoconf automake libtool pkg-config \
   hackrf libhackrf-dev gnuradio gr-osmosdr soapysdr-module-hackrf \
   python3 python3-pip python3-numpy python3-scipy python3-venv \
+  python3-scapy iw \
   libtalloc-dev libnl-3-dev libnl-genl-3-dev libzmq5 libusb-1.0-0-dev \
   sqlite3 || true
 
@@ -74,8 +75,20 @@ Restart=always
 RestartSec=2
 [Install]
 WantedBy=multi-user.target"
+install_unit watchtower-rid-beacon "[Unit]
+Description=Wi-Fi monitor Remote ID beacon decoder
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/watchtower-web/backend
+ExecStart=/usr/bin/python3 -u /opt/watchtower-web/backend/rid_beacon.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target"
 systemctl daemon-reload
-systemctl enable --now watchtower-web watchtower-c5-rid
+systemctl enable --now watchtower-web watchtower-c5-rid watchtower-rid-beacon
 
 echo "[7/8] Device checks..."
 hackrf_info 2>/dev/null | head -4 || echo "    (no HackRF attached yet)"
