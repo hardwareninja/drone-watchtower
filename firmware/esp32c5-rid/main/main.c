@@ -284,6 +284,11 @@ static bool parse_odid(const uint8_t *msg, int len, int8_t rssi, const uint8_t *
         memcpy(d.serial, msg + 2, n);
         d.serial[n] = 0;
         if (slot >= 0) {
+            /* Always pin the slot to this BDA — otherwise the next Location
+             * advert cannot find the Basic ID we just stored. */
+            if (bda) {
+                memcpy(mac_cache[slot].mac, bda, 6);
+            }
             memcpy(mac_cache[slot].serial, d.serial, sizeof(d.serial));
             mac_cache[slot].tick = xTaskGetTickCount();
             if (mac_cache[slot].lat_e7 || mac_cache[slot].lon_e7) {
@@ -299,6 +304,9 @@ static bool parse_odid(const uint8_t *msg, int len, int8_t rssi, const uint8_t *
         int32_t lon = le_i32(msg + 9);
         if (slot < 0) {
             return false;
+        }
+        if (bda) {
+            memcpy(mac_cache[slot].mac, bda, 6);
         }
         mac_cache[slot].lat_e7 = lat;
         mac_cache[slot].lon_e7 = lon;

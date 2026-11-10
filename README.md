@@ -100,3 +100,16 @@ Tested path: Raspberry Pi OS Bookworm 64-bit, or Kali ARM64, on the machine that
 8. Open `http://<pi-address>:8080`. Start Scan. Arm the aircraft you expect to hear on DroneID.
 
 History is SQLite at `/opt/watchtower-web/data/history.db`.
+
+## Research enhancements (`src/`)
+
+Offline / research modules from `drone-watchtower-enhancement-tasks.md`. The live sensor box still runs via `webapp/` + the luyii HackRF scanner; these modules are the ZC / channel / fusion / ML experiments.
+
+```bash
+pip install -r requirements.txt
+pytest tests/ -v
+python scripts/train_classifier.py --demo   # synthetic IQ → models/signal_classifier.pkl
+PYTHONPATH=src python -c "from main import EnhancedDroneWatchtower; ..."
+```
+
+Live fusion (Task 2.1) is also wired into the dashboard: RID + DroneID sessions with the same serial merge in `webapp/frontend/app.js`, and the C5 firmware joins BLE Basic ID ↔ Location via a per-MAC cache.

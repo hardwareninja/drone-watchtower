@@ -287,7 +287,9 @@ def publish_event(evt: dict) -> None:
         return
     with lock:
         state["events"] += 1
-    if evt.get("source") == "remoteid":
+    # Attach known-aircraft model for both RID and O2 plaintext sessions
+    # (O2 classic uses the real serial as session — same key as Remote ID).
+    if evt.get("session"):
         model = CONFIG.get("aircraft", {}).get(evt.get("session"))
         if model:
             evt["model"] = model
@@ -614,6 +616,7 @@ def tail_loop() -> None:
             for line in lines[seen:]:
                 evt = parse_line(line)
                 if evt and evt["crc"]:
+                    evt["source"] = "droneid"
                     publish_event(evt)
             seen = len(lines)
         time.sleep(0.4)
@@ -1179,6 +1182,7 @@ def droneid_loop() -> None:
                 for line in lines[seen:]:
                     evt = parse_line(line)
                     if evt and evt["crc"]:
+                        evt["source"] = "droneid"
                         publish_event(evt)
                 seen = len(lines)
             time.sleep(0.4)

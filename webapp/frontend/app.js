@@ -179,7 +179,14 @@ function onDetection(evt) {
   if (selectedKey === s.key) renderInfo();
 }
 
-/* ---- aircraft grouping: merge rid + djiid sessions active together ---- */
+/* ---- aircraft grouping: merge rid + djiid by serial (Task 2.1 fusion) ---- */
+function aircraftSerial(s) {
+  if (!s) return "";
+  // rid:SERIAL or djiid:SERIAL (O2 plaintext uses the real serial as session)
+  if (s.source === "remoteid") return s.key.slice(4);
+  return s.key.startsWith("djiid:") ? s.key.slice(6) : s.key;
+}
+
 function aircraftList() {
   const rids = [], djiids = [];
   for (const s of sessions.values()) (s.source === "remoteid" ? rids : djiids).push(s);
@@ -187,9 +194,13 @@ function aircraftList() {
   const used = new Set();
   for (const rid of rids) {
     const entry = { rid, djiids: [], lastTime: rid.lastTime };
+    const ridSerial = aircraftSerial(rid);
     for (const dj of djiids) {
-      if (!rid.model || used.has(dj.key) || dj.mode !== rid.mode) continue;
-      if (Math.abs(tsec(dj.lastTime) - tsec(rid.lastTime)) < 180000) {
+      if (used.has(dj.key)) continue;
+      const sameSerial = ridSerial && aircraftSerial(dj) === ridSerial;
+      const closeInTime = Math.abs(tsec(dj.lastTime) - tsec(rid.lastTime)) < 180000;
+      // Prefer exact serial match; fall back to time+model for legacy O4 hash sessions
+      if (sameSerial || (rid.model && closeInTime && dj.mode === rid.mode)) {
         entry.djiids.push(dj);
         used.add(dj.key);
       }

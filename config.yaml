@@ -1,0 +1,20 @@
+# Enhancement-module config (Task integration guide)
+signal_processing:
+  zc_detector:
+    threshold: 0.7
+    zc_roots: [600, 147]
+    max_delay: 10
+  channel_estimator:
+    window_size: 5
+    pilot_pattern: null
+
+fusion:
+  remote_id:
+    time_window: 2.0
+    max_drift: 0.5
+    buffer_duration: 60
+
+ml:
+  classifier:
+    model_path: models/signal_classifier.pkl
+    confidence_threshold: 0.8
