@@ -212,10 +212,10 @@ def insert_event(evt: dict) -> None:
     # a position-less event still needs to know where the station was, so the
     # history map can place it correctly after the station moves on GPS
     if not row.get("lat") and not row.get("lon"):
-        gps = state.get("gps") or {}
-        if gps.get("lat") is not None and gps.get("lon") is not None:
-            row["station_lat"] = gps["lat"]
-            row["station_lon"] = gps["lon"]
+        here = station_dict()
+        if here.get("lat") is not None and here.get("lon") is not None:
+            row["station_lat"] = here["lat"]
+            row["station_lon"] = here["lon"]
     try:
         with db_conn() as c:
             c.execute(
@@ -312,15 +312,71 @@ def public_gps() -> dict:
     }
 
 
+def _finite_lat_lon(lat, lon) -> tuple[float, float] | None:
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
+        return None
+    if lat_f == 0 and lon_f == 0:
+        return None
+    return round(lat_f, 6), round(lon_f, 6)
+
+
+def parse_network_geo(payload: dict) -> dict | None:
+    """Pull a position out of a public IP-geolocation response."""
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        return None
+    lat, lon = payload.get("latitude", payload.get("lat")), payload.get("longitude", payload.get("lon"))
+    loc = payload.get("loc")
+    if (lat is None or lon is None) and isinstance(loc, str) and "," in loc:
+        lat, lon = loc.split(",", 1)
+    parsed = _finite_lat_lon(lat, lon)
+    if parsed is None:
+        return None
+    return {"lat": parsed[0], "lon": parsed[1]}
+
+
+def lookup_network_geo() -> dict | None:
+    """Where this machine appears on the public network. No API key."""
+    for url in (
+        "https://ipwho.is/",
+        "https://ipinfo.io/json",
+        "https://ipapi.co/json/",
+    ):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "drone-watchtower"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                payload = json.loads(resp.read().decode())
+        except (OSError, json.JSONDecodeError, ValueError, UnicodeError):
+            continue
+        geo = parse_network_geo(payload)
+        if geo:
+            return geo
+    return None
+
+
 def station_dict() -> dict:
-    station = dict(CONFIG["station"])
+    """GPS fix wins. Until the receiver has one, use this machine's network location."""
+    raw = CONFIG.get("station") or {}
+    station = {"name": raw.get("name") or "Watchtower"}
     gps = state.get("gps") or {}
-    if gps.get("lat") is not None and gps.get("lon") is not None:
-        station["lat"] = gps["lat"]
-        station["lon"] = gps["lon"]
+    parsed = _finite_lat_lon(gps.get("lat"), gps.get("lon"))
+    if parsed is not None:
+        station["lat"], station["lon"] = parsed
         station["source"] = "gps"
-    else:
-        station["source"] = "approx"
+        return station
+    net = state.get("network_geo") or {}
+    parsed = _finite_lat_lon(net.get("lat"), net.get("lon"))
+    if parsed is not None:
+        station["lat"], station["lon"] = parsed
+        station["source"] = "network"
+        return station
+    station["lat"] = None
+    station["lon"] = None
+    station["source"] = "none"
     return station
 
 
@@ -684,6 +740,7 @@ BEAT_BUDGET_S = {
     "hop": 300,
     "droneid": 90,
     "retention": 120,
+    "netgeo": 120,
 }
 BEAT_BUDGET_DEFAULT_S = 60
 
@@ -1544,6 +1601,27 @@ def remoteid_loop(endpoint: str) -> None:
             time.sleep(1)
 
 
+def network_geo_loop() -> None:
+    """Keep a network position for the station until a GPS receiver has a fix."""
+    while True:
+        beat("netgeo")
+        geo = lookup_network_geo()
+        if geo:
+            prev = state.get("network_geo") or {}
+            state["network_geo"] = geo
+            state["network_geo_error"] = None
+            if (prev.get("lat"), prev.get("lon")) != (geo["lat"], geo["lon"]):
+                print(f"network location {geo['lat']}, {geo['lon']}", flush=True)
+                broadcast({"type": "status", "status": status_dict()})
+            wait = 900
+        else:
+            state["network_geo_error"] = "lookup failed"
+            wait = 30
+        for _ in range(max(1, wait // 30)):
+            time.sleep(30)
+            beat("netgeo")
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_db()
@@ -1552,6 +1630,7 @@ def startup() -> None:
         print("watchtower ready: demods + core radios OK", flush=True)
     else:
         print("watchtower NOT ready:", "; ".join(ready["problems"]), flush=True)
+    threading.Thread(target=network_geo_loop, daemon=True).start()
     threading.Thread(target=dongle_loop, daemon=True).start()
     threading.Thread(target=gps_loop, daemon=True).start()
     threading.Thread(target=usb_cam_loop, daemon=True).start()

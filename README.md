@@ -19,7 +19,7 @@ Passive receiver for nearby drones and crewed aircraft. It listens, it does not 
 |---|---|
 | HackRF Pro | Stays on DJI DroneID while the One keeps hopping. With only one HackRF, DroneID waits. |
 | RTL-SDR (RTL2832/2838) | ADS-B on 1090 MHz. The dashboard reads `http://127.0.0.1:8091/api/aircraft`. |
-| u-blox 7 USB (`1546:01a7`) | Moves the station marker onto a real GPS fix. Until then the map uses the coordinates in `config.json`. |
+| u-blox 7 USB (`1546:01a7`) | Moves the station marker onto a real GPS fix. Until then the map uses this machine's network location. |
 | USB UVC capture dongle | Relays the analog 5.8 GHz goggle receiver's picture into the video panel. |
 | 5.8 GHz band-pass filter and a 10–20 dB attenuator | Protects the HackRF. Keep the input below −5 dBm. |
 | Powered USB hub | The radios brown out on an unpowered hub or a flaky VM passthrough. |
@@ -54,7 +54,7 @@ The HackRF One does not listen to all of those at once. While scanning, it cycle
 - O4 telemetry that is wrapped as CRYP is not turned into a position here.
 - One HackRF cannot watch 2.4, 915, and 5.8 at the same time. Dwell time is shared.
 - Remote ID positions are empty until the aircraft has its own GPS fix.
-- The station dot stays on the coordinates in `webapp/backend/config.json` until the u-blox has a fix.
+- The station dot uses this machine's network location until the u-blox has a fix. `config.json` does not store coordinates.
 - ADS-B needs a view of the sky. Indoor, the RTL-SDR can be healthy and still report no aircraft.
 - Analog picture requires the goggle receiver and the USB grabber. The HackRF only reports the video carrier.
 - The aircraft registry in `config.json` is a display name for a serial you already know. It does not filter other aircraft out.
@@ -88,7 +88,7 @@ Tested path: Raspberry Pi OS Bookworm 64-bit, or Kali ARM64, on the machine that
 
 5. Flash the ESP32-C5 from `firmware/esp32c5-rid` with ESP-IDF before expecting Remote ID. The bridge opens whichever `ttyACM` the board enumerates as (`303a:1001`).
 
-6. Set the station and, if you want a friendly name, the aircraft registry:
+6. Set the station name and, if you want a friendly name, the aircraft registry. The map finds the station from the network, then from the u-blox:
 
    ```bash
    sudo nano /opt/watchtower-web/backend/config.json
