@@ -97,7 +97,7 @@ ssh "drone@${HOST}" 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
 
 ## Config that matters
 
-- **Station coords + aircraft registry**: `webapp/backend/config.json` → deploy + restart `watchtower-web`
+- **Station name + aircraft registry**: `webapp/backend/config.json` → deploy + restart `watchtower-web`. Position comes from the network, then from the u-blox.
 - **Scanner**: LNA 32 / VGA 24, 5.8G raster 5756.5/5776.5/5796.5/5816.5 MHz
 - **Drone behavior**: Avata 2 session hash changes per power cycle; RID positions zero until GPS fix (test outdoors)
 
@@ -115,7 +115,7 @@ ssh "drone@${HOST}" 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
    sudo bash scripts/deploy/raspi-install.sh
    ```
    It installs: HackRF + GNU Radio stack, turbofec (NEON build) + turbo adapter, luyii scanner, bkerler WiFi/BLE receivers, the webapp to `/opt/watchtower-web`, and all five systemd services.
-6. Set your station location + aircraft registry: `sudo nano /opt/watchtower-web/backend/config.json` → `systemctl restart watchtower-web`
+6. Set the station name + aircraft registry: `sudo nano /opt/watchtower-web/backend/config.json` → `systemctl restart watchtower-web`. The map locates the station from the network, then from GPS.
 7. Open `http://<pi-ip>:8080` from any device on the LAN — arm the drone, Start Scan
 
 **Pi-specific notes:**
