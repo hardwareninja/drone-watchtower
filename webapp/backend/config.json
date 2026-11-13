@@ -1,8 +1,6 @@
 {
   "station": {
-    "name": "Watchtower-01",
-    "lat": 22.2783,
-    "lon": 114.1747
+    "name": "Watchtower-01"
   },
   "aircraft": {},
   "retention_days": 90,

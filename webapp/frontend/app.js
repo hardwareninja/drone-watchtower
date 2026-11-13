@@ -663,8 +663,10 @@ function renderAdsb() {
       .bindTooltip(label, { direction: "top", offset: [0, -8] })
       .on("click", () => { selectedKey = "adsb:" + a.hex; renderSidebar(); renderAdsbInfo(); renderAdsb(); });
   }
-  if (adsb.size && station && !adsbFitted) {
-    const pts = [[station.lat, station.lon], ...[...adsb.values()].map((a) => [a.lat, a.lon])];
+  if (adsb.size && !adsbFitted) {
+    const pts = [...adsb.values()].map((a) => [a.lat, a.lon]);
+    const here = stationLl();
+    if (here) pts.push(here);
     map.fitBounds(L.latLngBounds(pts).pad(0.35));
     adsbFitted = true;
   }
@@ -695,10 +697,17 @@ function renderAdsbInfo() {
   $("pkt-body").innerHTML = `<tr><td>${a.last_seen ? String(a.last_seen).slice(11, 19) : "—"}</td><td>1090.0</td><td>ADS-B</td><td>—</td></tr>`;
 }
 
+function stationLl() {
+  if (!station || !hasFix(station.lat, station.lon)) return null;
+  return [Number(station.lat), Number(station.lon)];
+}
+
 function placeStation() {
-  const ll = [station.lat, station.lon];
-  const where = station.source === "gps" ? "GPS fix" : "approximate position";
-  const text = `<b>${station.name}</b><br>${where}<br>${Number(station.lat).toFixed(5)}, ${Number(station.lon).toFixed(5)}`;
+  const ll = stationLl();
+  if (!ll) return;
+  const where = station.source === "gps" ? "GPS fix"
+    : station.source === "network" ? "network location" : "approximate position";
+  const text = `<b>${station.name}</b><br>${where}<br>${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`;
   if (!stationMarker) {
     stationMarker = L.marker(ll, {
       icon: L.divIcon({
@@ -718,9 +727,8 @@ function placeStation() {
   if (station.source === "gps" && !gpsCentered) {
     map.setView(ll, Math.max(map.getZoom(), 15));
     gpsCentered = true;
-  } else if (!mapSeeded) {
-    // first status carries the configured station — drop the placeholder view
-    map.setView(ll, Math.max(map.getZoom(), 13));
+  } else if (station.source === "network" && !mapSeeded) {
+    map.setView(ll, 13);
     mapSeeded = true;
   }
 }
@@ -732,17 +740,18 @@ function renderMap() {
   if (!dotLayer) dotLayer = L.layerGroup().addTo(map);
   dotLayer.clearLayers();
   if (activityRing) activityRing.remove();
+  const here = stationLl();
   const djs = [...sessions.values()].filter((s) => s.source === "droneid" && s.packets.length);
   const latestDj = djs.sort((a, b) => tsec(b.lastTime) - tsec(a.lastTime))[0];
-  if (latestDj) {
+  if (latestDj && here) {
     const last = latestDj.packets[0];
     const rM = Math.max(60, Math.min(900, 60000 * Math.pow(2, (last.rssi + 50) / 10)));
-    activityRing = L.circle([station.lat, station.lon], {
+    activityRing = L.circle(here, {
       radius: rM, color: "#f85149", weight: 1, fillOpacity: 0.08,
     }).addTo(dotLayer);
   }
-  for (const p of latestDj ? latestDj.packets.slice(0, 60) : []) {
-    L.circleMarker([station.lat + jitter(), station.lon + jitter()], {
+  for (const p of latestDj && here ? latestDj.packets.slice(0, 60) : []) {
+    L.circleMarker([here[0] + jitter(), here[1] + jitter()], {
       radius: p.marker === "CRYP" ? 6 : 4, color: p.marker === "CRYP" ? "#d29922" : "#f85149",
       fillColor: p.marker === "CRYP" ? "#d29922" : "#f85149", fillOpacity: 0.85, weight: 1,
     }).addTo(dotLayer).bindPopup(`<b>${p.marker}</b> · session ${latestDj.key.slice(6)}<br>${p.freq} MHz · ${p.rssi} dBFS`);
@@ -756,7 +765,9 @@ function renderMap() {
       s.droneDot = L.circleMarker([s.pos.lat, s.pos.lon], {
         radius: 7, color: "#f85149", fillColor: "#f85149", fillOpacity: 0.9, weight: 2,
       }).addTo(map).bindTooltip("Drone — " + via);
-      map.fitBounds(L.latLngBounds([[s.pos.lat, s.pos.lon], [station.lat, station.lon]]).pad(0.3));
+      const bounds = [[s.pos.lat, s.pos.lon]];
+      if (here) bounds.push(here);
+      map.fitBounds(L.latLngBounds(bounds).pad(0.3));
     }
     s.trailLine.setLatLngs(s.trail);
     s.droneDot.setLatLng([s.pos.lat, s.pos.lon]);
@@ -1007,6 +1018,7 @@ function drawHistoryMap(evs) {
     if (!station) break;
     const slat = e.station_lat != null ? e.station_lat : station.lat;
     const slon = e.station_lon != null ? e.station_lon : station.lon;
+    if (!hasFix(slat, slon)) continue;
     L.circleMarker([slat + jitter(), slon + jitter()], {
       radius: e.marker === "CRYP" ? 5 : 3.2,
       color: e.marker === "CRYP" ? "#d29922" : "#f85149",
@@ -1024,7 +1036,7 @@ function init() {
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", {
     maxZoom: 16,
   }).addTo(map);
-  map.setView([22.2783, 114.1747], 12);
+  map.setView([20, 0], 2);
 
   $("btn-scan").onclick = async () => {
     $("btn-scan").disabled = true;
