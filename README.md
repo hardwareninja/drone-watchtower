@@ -2,6 +2,22 @@
 
 Passive receiver for nearby drones and crewed aircraft. It listens, it does not transmit, jam, or take control of a link. The dashboard is a browser on port 8080.
 
+## Dashboard
+
+Open `http://<sensor>:8080`. The page has two working views. The captures below were taken with no radios plugged in, so those chips are red and the marker is a network location.
+
+**Live Monitoring** is the operator picture. The green marker is this station. The top row is the radios: a red chip means that receiver is missing or offline, and a green chip means it is up. The left column lists drones heard on DroneID or Remote ID, and crewed aircraft from ADS-B. **Stop scan** pauses DroneID and the HackRF hop; **Start scan** resumes them. Select a row to see the packet detail on the right.
+
+![Live monitoring map with the station marker and radio status](docs/screenshots/live-monitoring.png)
+
+The station starts where this machine appears on the public network. Click the marker to see that source. When the u-blox receiver has a fix, the same marker moves onto the GPS position.
+
+![Station popup showing a network location](docs/screenshots/station-location.png)
+
+**Events** is the detection log. Filter by protocol and date, export CSV, or show the same rows on the map. Each row keeps the time, identifier, protocol, marker, frequency, and level.
+
+![Events view with one DroneID history row](docs/screenshots/events.png)
+
 ## Hardware
 
 ### Required
