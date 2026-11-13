@@ -67,7 +67,88 @@ function setStatus(st) {
   setDongles(st.dongles);
   setGps(st.gps);
   setInternet(st.internet);
+  setReadyBanner(st);
+  setScanBar(st);
   if (map && station) placeStation();
+}
+
+function setScanBar(st) {
+  const armed = st.armed !== false;
+  const dongles = {};
+  for (const d of st.dongles || []) dongles[d.id] = d;
+  const oneAtt = !!(dongles.one && dongles.one.attached);
+  const proAtt = !!(dongles.pro && dongles.pro.attached);
+  const c5Att = !!(dongles.c5 && dongles.c5.attached);
+  const c5Live = !!(dongles.c5 && dongles.c5.live);
+  const hop = armed && oneAtt ? (st.phase_hop || null) : null;
+  const droneidOn = !!(armed && proAtt && st.phase_droneid);
+
+  const rfLive = $("rf-live");
+  const rfActive = $("rf-active");
+  if (rfLive && rfActive) {
+    const scanning = !!(armed && oneAtt && hop);
+    rfLive.classList.toggle("on", scanning);
+    rfLive.classList.toggle("off", !scanning);
+    if (!oneAtt) rfActive.textContent = "HackRF One offline";
+    else if (!armed) rfActive.textContent = "scan stopped";
+    else {
+      const age = st.phase_hop_s != null ? ` · ${st.phase_hop_s}s` : "";
+      rfActive.textContent = hop
+        ? `HackRF One · ${hop}${age}`
+        : "HackRF One · hopping…";
+    }
+  }
+  const steps = $("rf-steps");
+  if (steps) {
+    steps.querySelectorAll("[data-hop]").forEach((el) => {
+      el.classList.toggle("on", el.getAttribute("data-hop") === hop);
+    });
+  }
+
+  const pro = $("scan-pro");
+  const proProto = $("scan-pro-proto");
+  if (pro && proProto) {
+    pro.classList.toggle("active", droneidOn);
+    pro.classList.toggle("idle", !proAtt || !armed);
+    proProto.textContent = !proAtt ? "offline" : !armed ? "idle" : (droneidOn ? "DroneID" : "DroneID");
+  }
+
+  const c5 = $("scan-c5");
+  const c5Proto = $("scan-c5-proto");
+  if (c5 && c5Proto) {
+    c5.classList.toggle("active", c5Att && c5Live);
+    c5.classList.toggle("idle", !c5Att);
+    c5Proto.textContent = !c5Att ? "offline" : c5Live ? "RemoteID" : "waiting";
+  }
+
+  const hopLabel = $("dongle-one") && $("dongle-one").querySelector(".dongle-hop-label");
+  if (hopLabel) hopLabel.textContent = hop || "One";
+  const dongleOne = $("dongle-one");
+  if (dongleOne) {
+    dongleOne.title = hop
+      ? `HackRF One · scanning ${hop}`
+      : "HackRF One · ELRS / TBS / MAVLink / VTX hop";
+  }
+}
+
+async function pullStatus() {
+  try {
+    const st = await fetch("/api/status", { cache: "no-store" }).then((r) => r.json());
+    setStatus(st);
+  } catch (_) { /* offline */ }
+}
+
+function setReadyBanner(st) {
+  const el = $("ready-banner");
+  if (!el) return;
+  const problems = st.problems || [];
+  if (st.ready === false && problems.length) {
+    el.textContent = "Not ready — " + problems.join("; ");
+    el.classList.remove("hidden");
+  } else {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
 }
 
 function setInternet(up) {
@@ -1010,6 +1091,8 @@ function init() {
     $(id).addEventListener("change", loadHistory);
   }
   setInterval(expireLive, 1000);
+  pullStatus();
+  setInterval(pullStatus, 1000);  // keep RF hop phase visible even between WS pushes
   connect();
 }
 

@@ -496,6 +496,10 @@ def demod_iq(sig, fs: float) -> list[dict]:
         return []
     chunks = energy_bursts(sig, fs)
     if not chunks:
+        # No SiK-like bursts. Do NOT demod the whole buffer — on ARM an
+        # 8 Msps × 2 s capture stalls the HackRF One hop for minutes.
+        if len(sig) > int(fs * 0.12):
+            return []
         chunks = [sig]
     found = []
     seen = set()
@@ -661,14 +665,20 @@ def public_vehicle(v: dict) -> dict:
 
 
 def pass_rf(serial: str = ONE) -> list[dict]:
-    """One RF turn: wideband 915 (and 433) capture, channelize hops, demod SiK/MAVLink."""
+    """One RF turn: short 915/433 captures, burst-gate, demod SiK/MAVLink.
+
+    Kept deliberately light so the HackRF One hop (ELRS→TBS→MAVLink→VTX)
+    does not stall for minutes on empty air.
+    """
     if not HAVE_NP:
         return []
     acc: dict[int, dict] = {}
+    # 2 Msps is enough for SiK channelize; 8 Msps wideband was too heavy on ARM.
     plans = (
-        (915_000_000, FS_WB, 2.2, 915.0),
-        (433_920_000, FS_CAP, 1.2, 433.92),
+        (915_000_000, FS_CAP, 0.6, 915.0),
+        (433_920_000, FS_CAP, 0.4, 433.92),
     )
+    t0 = time.time()
     for hz, fs, sec, label in plans:
         path = capture(hz, sec, serial, fs=fs)
         if not path:
@@ -676,16 +686,17 @@ def pass_rf(serial: str = ONE) -> list[dict]:
         sig = None
         try:
             sig = load_iq(path)
-            frames = demod_iq(sig, fs)
+            bursts = energy_bursts(sig, fs) if sig is not None else []
+            frames = demod_iq(sig, fs) if bursts else []
         finally:
             try:
                 os.remove(path)
             except OSError:
                 pass
-        nburst = len(energy_bursts(sig, fs)) if sig is not None else 0
+        nburst = len(bursts) if sig is not None else 0
         nids = sorted({fr.get("sik_netid") for fr in frames if fr.get("sik_netid")})
-        print(f"mavlink {label} MHz wideband bursts {nburst} → {len(frames)} frames "
-              f"netid {nids}", flush=True)
+        print(f"mavlink {label} MHz bursts {nburst} → {len(frames)} frames "
+              f"netid {nids} ({time.time() - t0:.1f}s)", flush=True)
         for fr in frames:
             merge_vehicle(acc, fr, freq=label, via=f"{label:.0f} MHz")
         if acc:

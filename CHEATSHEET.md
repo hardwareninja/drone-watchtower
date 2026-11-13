@@ -1,6 +1,7 @@
 # Drone Watchtower — Lab Cheat Sheet
 
-Sensor box: Kali VM `drone@192.168.50.185` (aarch64) · Dashboard: `http://192.168.50.185:8080`
+Sensor box: hostname `drone` (aarch64) · Dashboard: `http://drone.local:8080`
+IP changes with every router — do not hard-code it. Discover: `bash scripts/find-watchtower.sh`
 Dev box: Mac (`~/Projects/drone-watchtower`)
 
 ---
@@ -55,10 +56,10 @@ Key paths: scanner `/opt/droneid-repo`, turbo `/opt/droneid-tools/remove_turbo_s
 
 ```bash
 # --- dashboard & scanning ---
-open http://192.168.50.185:8080            # UI auto-reloads itself on deploys
-curl -X POST http://192.168.50.185:8080/api/scan/start    # or use UI button
-curl -X POST http://192.168.50.185:8080/api/scan/stop
-curl -X POST http://192.168.50.185:8080/api/replay/start  # demo the archived flight
+open http://drone.local:8080               # UI auto-reloads itself on deploys
+curl -X POST http://drone.local:8080/api/scan/start       # or use UI button
+curl -X POST http://drone.local:8080/api/scan/stop
+curl -X POST http://drone.local:8080/api/replay/start     # demo the archived flight
 
 # --- capture (on Kali, HackRF) ---
 scripts/capture/hackrf_survey.sh 5800                    # band sweep (2400|5800|900|all)
@@ -73,12 +74,13 @@ python3 /opt/droneid-repo/src/droneid_hackrf_scanner.py --replay out.cs8 \
 .venv/bin/python services/pipeline/parse_infp.py <payload_hex>   # INFP structure
 
 # --- history / data ---
-curl http://192.168.50.185:8080/api/history/sessions      # session list (JSON)
-sqlite3 /opt/watchtower-web/data/history.db              # raw event DB (on Kali)
+curl http://drone.local:8080/api/history/sessions         # session list (JSON)
+sqlite3 /opt/watchtower-web/data/history.db              # raw event DB (on sensor)
 
 # --- deploy webapp changes ---
-scp -r webapp/backend webapp/frontend drone@192.168.50.185:/tmp/deploy-webapp/
-ssh drone@192.168.50.185 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
+HOST=drone.local   # or: bash scripts/find-watchtower.sh
+scp -r webapp/backend webapp/frontend webapp/deploy-kali.sh "drone@${HOST}:/tmp/deploy-webapp/"
+ssh "drone@${HOST}" 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
 # open tabs self-reload (build number tracks frontend files too)
 ```
 

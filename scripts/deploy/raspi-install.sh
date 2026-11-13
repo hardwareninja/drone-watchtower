@@ -43,9 +43,15 @@ pip3 install --break-system-packages -q numpy pyzmq fastapi "uvicorn[standard]" 
   || pip3 install -q numpy pyzmq fastapi "uvicorn[standard]"
 
 echo "[5/8] Webapp deploy to /opt/watchtower-web..."
+# Keep capture demods in sync — app imports them from backend/.
+cp -f "$REPO/scripts/capture/elrs_demod.py" "$REPO/webapp/backend/elrs_demod.py"
+cp -f "$REPO/scripts/capture/mavlink_demod.py" "$REPO/webapp/backend/mavlink_demod.py"
 mkdir -p /opt/watchtower-web/data
 rm -rf /opt/watchtower-web/backend /opt/watchtower-web/frontend
 cp -r "$REPO/webapp/backend" "$REPO/webapp/frontend" /opt/watchtower-web/
+for req in app.py elrs_demod.py mavlink_demod.py c5_rid_bridge.py usb_locate.py; do
+  [ -f "/opt/watchtower-web/backend/$req" ] || { echo "FATAL: missing backend/$req"; exit 1; }
+done
 sed -i 's|/home/drone/droneid-results|/root/droneid-results|' /opt/watchtower-web/backend/app.py
 mkdir -p /root/droneid-results
 
@@ -90,8 +96,13 @@ WantedBy=multi-user.target"
 systemctl daemon-reload
 systemctl enable --now watchtower-web watchtower-c5-rid watchtower-rid-beacon
 
-echo "[7/8] Device checks..."
+echo "[7/8] Device checks + stable hostname (IP changes every router)..."
 hackrf_info 2>/dev/null | head -4 || echo "    (no HackRF attached yet)"
+# mDNS so clients use drone.local instead of chasing DHCP leases
+if command -v avahi-daemon >/dev/null 2>&1 || apt-get install -y --no-install-recommends avahi-daemon >/dev/null 2>&1; then
+  hostnamectl set-hostname drone 2>/dev/null || hostname drone
+  systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+fi
 
 echo "[8/8] Done."
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -99,7 +110,9 @@ cat <<EOF
 
 ================================================================
  Drone Watchtower sensor is installed.
- Dashboard : http://${IP:-<pi-ip>}:8080
+ Dashboard : http://drone.local:8080
+             (fallback IP right now: http://${IP:-<pi-ip>}:8080)
+ Find box  : bash scripts/find-watchtower.sh   # from your laptop
  Station   : edit /opt/watchtower-web/backend/config.json
              (lat/lon + aircraft registry), then:
              systemctl restart watchtower-web

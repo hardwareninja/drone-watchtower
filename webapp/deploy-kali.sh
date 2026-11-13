@@ -4,9 +4,23 @@ set -euo pipefail
 
 DEST=/opt/watchtower-web
 # Replace only the code; data/ holds history.db and must survive a deploy.
+SRC=/tmp/deploy-webapp
+# Capture demods must live next to app.py (uvicorn WorkingDirectory=backend).
+if [ -f "$SRC/../scripts/capture/elrs_demod.py" ]; then
+  cp -f "$SRC/../scripts/capture/elrs_demod.py" "$SRC/backend/elrs_demod.py"
+fi
+if [ -f "$SRC/../scripts/capture/mavlink_demod.py" ]; then
+  cp -f "$SRC/../scripts/capture/mavlink_demod.py" "$SRC/backend/mavlink_demod.py"
+fi
 mkdir -p "$DEST"
 rm -rf "$DEST/backend" "$DEST/frontend"
-cp -r /tmp/deploy-webapp/backend /tmp/deploy-webapp/frontend "$DEST/"
+cp -r "$SRC/backend" "$SRC/frontend" "$DEST/"
+for req in app.py elrs_demod.py mavlink_demod.py c5_rid_bridge.py usb_locate.py; do
+  if [ ! -f "$DEST/backend/$req" ]; then
+    echo "FATAL: missing $DEST/backend/$req — refuse to restart a half deploy"
+    exit 1
+  fi
+done
 mkdir -p "$DEST/data"
 chown -R drone:drone "$DEST"
 

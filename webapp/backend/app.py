@@ -74,10 +74,12 @@ ELRS_RATES = {5: "500 Hz", 6: "250 Hz", 7: "150/100 Hz", 8: "50 Hz"}
 BASE = Path(__file__).resolve().parent
 BUILD = str(max(int(p.stat().st_mtime) for p in [
     BASE.joinpath("app.py"),
+    BASE.joinpath("elrs_demod.py"),
+    BASE.joinpath("mavlink_demod.py"),
     BASE.parent.joinpath("frontend", "app.js"),
     BASE.parent.joinpath("frontend", "index.html"),
     BASE.parent.joinpath("frontend", "style.css"),
-]))
+] if p.exists()))
 FRONTEND = BASE.parent / "frontend"
 RESULTS = Path("/home/drone/droneid-results")
 CONFIG = json.loads((BASE / "config.json").read_text())
@@ -322,8 +324,28 @@ def station_dict() -> dict:
     return station
 
 
+def readiness() -> dict:
+    """Boot/deploy self-check: missing demods and radios surface here, not as mystery silence."""
+    problems: list[str] = []
+    for name, mod in (("elrs_demod", DEMOD), ("mavlink_demod", MAV)):
+        if mod is None:
+            problems.append(f"{name} import failed — packet path disabled")
+        path = BASE / f"{name}.py"
+        if not path.exists():
+            problems.append(f"{name}.py missing under {BASE}")
+    present = {d["id"]: d for d in dongle_status()}
+    if not present.get("pro", {}).get("attached"):
+        problems.append("HackRF Pro (DroneID) not attached")
+    if not present.get("one", {}).get("attached"):
+        problems.append("HackRF One (ELRS/hop) not attached")
+    if not present.get("c5", {}).get("attached"):
+        problems.append("ESP32-C5 (RemoteID) not attached")
+    return {"ok": not problems, "problems": problems}
+
+
 def status_dict() -> dict:
     started = state.get("started")
+    ready = readiness()
     return {
         "running": state["running"],
         "armed": state.get("armed", True),
@@ -332,12 +354,21 @@ def status_dict() -> dict:
         "started": started,
         "uptime_s": round(time.time() - started, 1) if started else None,
         "phase": state.get("phase"),
+        "phase_droneid": state.get("phase_droneid"),
+        "phase_hop": state.get("phase_hop"),  # HackRF One: ELRS | TBS | MAVLink | VTX
+        "phase_hop_s": (
+            round(time.time() - state["phase_hop_started"], 1)
+            if state.get("phase_hop_started") and state.get("phase_hop") else None
+        ),
         "station": station_dict(),
         "gps": public_gps(),
         "dongles": dongle_status(),
         "internet": state.get("internet"),
         "adsb_error": state.get("adsb_error"),
         "build": BUILD,
+        "ready": ready["ok"],
+        "problems": ready["problems"],
+        "demods": {"elrs": DEMOD is not None, "mavlink": MAV is not None},
     }
 
 
@@ -592,6 +623,10 @@ def kill_proc(proc) -> None:
 def refresh_phase() -> None:
     parts = [p for p in (state.get("phase_droneid"), state.get("phase_hop")) if p]
     state["phase"] = " + ".join(parts) if parts else None
+    hop = state.get("phase_hop")
+    if hop != state.get("_phase_hop_seen"):
+        state["_phase_hop_seen"] = hop
+        state["phase_hop_started"] = time.time() if hop else None
     broadcast({"type": "status", "status": status_dict()})
 
 
@@ -644,18 +679,41 @@ def status() -> dict:
     return status_dict()
 
 
+# Hop RF turns (esp. MAVLink wideband demod) routinely exceed 60s on ARM.
+BEAT_BUDGET_S = {
+    "hop": 300,
+    "droneid": 90,
+    "retention": 120,
+}
+BEAT_BUDGET_DEFAULT_S = 60
+
+
+@app.get("/api/ready")
+def ready() -> dict:
+    return readiness()
+
+
 @app.get("/api/health")
 def health() -> dict:
-    """Liveness of every background loop plus storage and radio state."""
+    """Liveness of every background loop plus storage, demods, and radio state."""
     now = time.time()
     beats = {k: round(now - v, 1) for k, v in sorted(BEATS.items())}
+    stale = [
+        name for name, age in beats.items()
+        if age > BEAT_BUDGET_S.get(name, BEAT_BUDGET_DEFAULT_S)
+    ]
+    ready = readiness()
     try:
         db_bytes = DB.stat().st_size
     except OSError:
         db_bytes = 0
     return {
-        "ok": max(beats.values(), default=0) < 60,
+        "ok": not stale and ready["ok"],
         "beats": beats,
+        "stale": stale,
+        "ready": ready["ok"],
+        "problems": ready["problems"],
+        "demods": {"elrs": DEMOD is not None, "mavlink": MAV is not None},
         "db_bytes": db_bytes,
         "dongles": dongle_status(),
         "internet": state.get("internet"),
@@ -1350,6 +1408,25 @@ def usb_cam_loop() -> None:
         time.sleep(3)
 
 
+def with_hop_beat(fn, *args, **kwargs):
+    """Keep the hop watchdog fresh while a long RF/demod turn runs."""
+    stop = threading.Event()
+
+    def _keep() -> None:
+        beat("hop")
+        while not stop.wait(5.0):
+            beat("hop")
+
+    keeper = threading.Thread(target=_keep, daemon=True, name="hop-beat")
+    keeper.start()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        stop.set()
+        keeper.join(timeout=1.0)
+        beat("hop")
+
+
 def hop_loop() -> None:
     """HackRF One alternates ELRS 2.4 GHz, TBS 868/915, MAVLink 433/915, and VTX 5.8 GHz."""
     last_elrs: dict | None = None
@@ -1368,28 +1445,30 @@ def hop_loop() -> None:
         state["phase_hop"] = "ELRS"
         refresh_phase()
         beat("hop")
-        shown, last_elrs, last_elrs_at = remember(elrs_demod_pass(), last_elrs, last_elrs_at, 120)
+        shown, last_elrs, last_elrs_at = remember(
+            with_hop_beat(elrs_demod_pass), last_elrs, last_elrs_at, 120)
         if not state.get("armed"):
             continue
         broadcast({"type": "elrs", "link": shown})
         state["phase_hop"] = "TBS"
         refresh_phase()
         beat("hop")
-        shown, last_tbs, last_tbs_at = remember(tbs_survey(), last_tbs, last_tbs_at, 60)
+        shown, last_tbs, last_tbs_at = remember(
+            with_hop_beat(tbs_survey), last_tbs, last_tbs_at, 60)
         if not state.get("armed"):
             continue
         broadcast({"type": "tbs", "link": shown})
         state["phase_hop"] = "MAVLink"
         refresh_phase()
         beat("hop")
-        vehicles = mavlink_rf_pass()
+        vehicles = with_hop_beat(mavlink_rf_pass)
         if not state.get("armed"):
             continue
         broadcast({"type": "mavlink", "vehicles": vehicles})
         state["phase_hop"] = "VTX"
         refresh_phase()
         beat("hop")
-        found = vtx_survey()
+        found = with_hop_beat(vtx_survey)
         now = time.time()
         for l in found:
             key = l["channel"] or str(l["freq"])
@@ -1468,6 +1547,11 @@ def remoteid_loop(endpoint: str) -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    ready = readiness()
+    if ready["ok"]:
+        print("watchtower ready: demods + core radios OK", flush=True)
+    else:
+        print("watchtower NOT ready:", "; ".join(ready["problems"]), flush=True)
     threading.Thread(target=dongle_loop, daemon=True).start()
     threading.Thread(target=gps_loop, daemon=True).start()
     threading.Thread(target=usb_cam_loop, daemon=True).start()

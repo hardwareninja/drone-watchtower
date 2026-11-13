@@ -4,7 +4,7 @@
       "command": "ssh",
       "args": [
         "-T",
-        "drone@192.168.50.185",
+        "drone@drone.local",
         "python3 /opt/kali-mcp/server.py"
       ]
     },
@@ -12,7 +12,7 @@
       "command": "ssh",
       "args": [
         "-T",
-        "drone@192.168.50.185",
+        "drone@drone.local",
         "/opt/hexstrike-ai/hexstrike-env/bin/python3 /opt/hexstrike-ai/hexstrike_mcp.py --server http://localhost:8888"
       ]
     }
