@@ -4,9 +4,7 @@
     "lat": 22.2783,
     "lon": 114.1747
   },
-  "aircraft": {
-    "1581F6W8B2448002008T": "DJI Avata 2"
-  },
+  "aircraft": {},
   "retention_days": 90,
   "scanner_band": "both",
   "scanner_preset": "baseline",
