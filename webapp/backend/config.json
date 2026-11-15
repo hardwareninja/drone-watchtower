@@ -8,15 +8,32 @@
   "scanner_preset": "baseline",
   "scanner_freqs": [],
   "scanner_dwell": 0.8,
+  "scanner_root600_threshold": 0.55,
+  "scanner_root147_threshold": 0.5,
   "adsb_url": "http://127.0.0.1:8091/api/aircraft",
+  "fr24_api_token": "",
+  "adsb_network_feeds": [
+    {
+      "name": "adsb.lol",
+      "url": "https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{dist}",
+      "key": "ac"
+    },
+    {
+      "name": "adsb.fi",
+      "url": "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{dist}",
+      "key": "aircraft"
+    }
+  ],
+  "adsb_network_radius_nm": 100,
   "remoteid_zmq": [
     "tcp://127.0.0.1:4226",
     "tcp://127.0.0.1:4225",
     "tcp://127.0.0.1:4223",
     "tcp://127.0.0.1:4222"
   ],
-  "hackrf_roles": {
-    "0000000000000000147865de331550df": "DroneID",
-    "0000000000000000a06063c82451835f": "ELRS 2.4"
-  }
+  "hackrf_serials": {
+    "droneid": "",
+    "hop": ""
+  },
+  "hackrf_roles": {}
 }

@@ -11,7 +11,7 @@ import sys
 import time
 import urllib.request
 
-ONE = "0000000000000000a06063c82451835f"
+ONE = os.environ.get("HACKRF_HOP", "")
 API = "http://127.0.0.1:8080"
 IQ = "/tmp/elrs-probe.iq"
 RATE = 10_000_000          # 10 Msps -> 10 MHz window, ~20 MB/s over USB2

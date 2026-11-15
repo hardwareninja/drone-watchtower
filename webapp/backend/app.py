@@ -17,6 +17,7 @@ import io
 import json
 import os
 import select
+import secrets
 import socket
 import sqlite3
 import subprocess
@@ -26,6 +27,10 @@ import urllib.request
 from pathlib import Path
 
 import usb_locate
+import adsb_classify
+import adsb_network
+import textsan
+import zc_gate
 
 try:
     from PIL import Image
@@ -39,8 +44,8 @@ try:
 except ImportError:
     HAVE_CV2 = False
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi import Body, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 try:
@@ -56,6 +61,15 @@ REMOTEID_ZMQ = [
     "tcp://127.0.0.1:4222",  # Sniffle BLE receiver (macdb format)
 ]
 ADSB_URL = "http://127.0.0.1:8091/api/aircraft"  # ADSB1090, behind the map proxy on :8090
+ADSB_NETWORK_FEEDS = list(adsb_network.DEFAULT_FEEDS)
+ADSB_NETWORK_RADIUS_NM = 100
+ADSB_NETWORK_INTERVAL_S = 20
+ADSB_POLL_INTERVAL_S = 2
+
+# The shortest possible DroneID payload. The classic O2/O3 frame is 91
+# bytes; the newer O4 frames are 131, 163 and 166. Anything shorter is a
+# decode that failed, not a frame -- see parse_line.
+MIN_DRONEID_PAYLOAD_BYTES = 91
 
 try:
     import elrs_demod as DEMOD          # packet-level ELRS LoRa demodulator
@@ -82,20 +96,158 @@ BUILD = str(max(int(p.stat().st_mtime) for p in [
 ] if p.exists()))
 FRONTEND = BASE.parent / "frontend"
 RESULTS = Path("/home/drone/droneid-results")
-CONFIG = json.loads((BASE / "config.json").read_text())
+CONFIG_PATH = BASE / "config.json"
+CONFIG = json.loads(CONFIG_PATH.read_text())
+_config_lock = threading.Lock()
+
+
+def save_config() -> None:
+    """Persist CONFIG to disk. Keeps secrets like FR24 token server-side only."""
+    with _config_lock:
+        CONFIG_PATH.write_text(json.dumps(CONFIG, indent=2) + "\n")
+
+
+def reload_config() -> None:
+    with _config_lock:
+        CONFIG.clear()
+        CONFIG.update(json.loads(CONFIG_PATH.read_text()))
 
 SCANNER = "/opt/droneid-repo/src/droneid_hackrf_scanner.py"
 TURBO = "/opt/droneid-tools/remove_turbo_soft"
 LIBHACKRF = "/usr/lib/aarch64-linux-gnu/libhackrf.so.0"
 # Pro stays on DroneID. One sweeps ELRS and TBS. One tuner each.
-HACKRF_DRONEID = "0000000000000000147865de331550df"
-HACKRF_HOP = "0000000000000000a06063c82451835f"
+#
+# The serials identify the operator's own hardware, so they are not
+# baked into the source: they come from the environment or from
+# config.json ("hackrf_serials": {"droneid": ..., "hop": ...}). A fresh
+# clone has none and the box reports the radios as unassigned until
+# they are set.
+HACKRF_DRONEID = os.environ.get(
+    "HACKRF_DRONEID", str((CONFIG.get("hackrf_serials") or {}).get("droneid") or ""))
+HACKRF_HOP = os.environ.get(
+    "HACKRF_HOP", str((CONFIG.get("hackrf_serials") or {}).get("hop") or ""))
+# Demod modules read HACKRF_HOP at import time; push the resolved serial so
+# config.json-only stations still open the One, not whichever radio is first.
+if DEMOD is not None and HACKRF_HOP:
+    DEMOD.ONE = HACKRF_HOP
+if MAV is not None and HACKRF_HOP:
+    MAV.ONE = HACKRF_HOP
 
 app = FastAPI(title="Drone Watchtower")
 
+
+# ---------------------------------------------------------------------------
+# API token
+# ---------------------------------------------------------------------------
+# The dashboard is reachable from the operator's machine over the LAN, so
+# it is a control plane on an untrusted network: without a token any
+# neighbour can read the detection history (a geolocated log of every
+# drone and crewed aircraft seen near the station) or stop the scan.
+#
+# The token is optional — when it is not configured the API stays open,
+# which is only reasonable on a loopback bind or a trusted segment. Set
+# WATCHTOWER_TOKEN in the environment, or "api_token" in config.json.
+# ---------------------------------------------------------------------------
+TOKEN_ENV = "WATCHTOWER_TOKEN"
+TOKEN_COOKIE = "watchtower_token"
+
+# Paths that stay reachable without a token: the page itself (so the
+# browser can ask for a token), the static assets, and the token check.
+PUBLIC_PATHS = {"/api/auth/status", "/api/auth/login", "/favicon.ico"}
+
+
+def api_token() -> str:
+    """The configured API token, or "" when the API is unauthenticated."""
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        token = str(CONFIG.get("api_token") or "").strip()
+    return token
+
+
+def token_ok(request) -> bool:
+    """True when the request carries the configured token."""
+    expected = api_token()
+    if not expected:
+        return True
+    header = request.headers.get("x-watchtower-token") or ""
+    if header and secrets.compare_digest(header, expected):
+        return True
+    cookie = request.cookies.get(TOKEN_COOKIE) or ""
+    if cookie and secrets.compare_digest(cookie, expected):
+        return True
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        if secrets.compare_digest(auth[7:].strip(), expected):
+            return True
+    return False
+
+
+@app.middleware("http")
+async def require_token(request, call_next):
+    """Reject API calls that do not carry the configured token.
+
+    Only ``/api/*`` is guarded. The static page stays reachable so the
+    browser can ask for the token and so a wrong URL gives a clear
+    answer rather than a blank page.
+    """
+    path = request.url.path
+    if path.startswith("/api/") and path not in PUBLIC_PATHS:
+        if not token_ok(request):
+            return JSONResponse({"ok": False, "error": "token required"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> dict:
+    """Whether a token is required, and whether this request carries one."""
+    return {
+        "required": bool(api_token()),
+        "ok": token_ok(request),
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: dict = Body(default_factory=dict)) -> Response:
+    """Exchange the token for a session cookie."""
+    expected = api_token()
+    if not expected:
+        return JSONResponse({"ok": True, "required": False})
+    supplied = str((payload or {}).get("token") or "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        return JSONResponse({"ok": False, "error": "invalid token"}, status_code=401)
+    response = JSONResponse({"ok": True, "required": True})
+    # Not HttpOnly: the frontend reads it to send on the websocket and
+    # to keep the page working after a reload. It is the same secret the
+    # operator already types, on a LAN-only box.
+    response.set_cookie(
+        TOKEN_COOKIE, expected, max_age=60 * 60 * 24 * 30,
+        samesite="lax", path="/")
+    return response
+
+def _armed_path() -> Path:
+    return Path(os.environ.get("WATCHTOWER_DB", "/opt/watchtower-web/data/history.db")).parent / "armed"
+
+
+def load_armed() -> bool:
+    """Last Start/Stop choice — survives deploy restarts so refresh isn't blank."""
+    try:
+        return _armed_path().read_text().strip() != "0"
+    except OSError:
+        return True
+
+
+def save_armed(armed: bool) -> None:
+    try:
+        path = _armed_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("1" if armed else "0")
+    except OSError as exc:
+        print(f"armed persist failed: {exc}", flush=True)
+
+
 state = {
     "running": False,
-    "armed": True,         # master switch for DroneID, ELRS, and TBS
+    "armed": load_armed(),  # master switch for DroneID, ELRS, and TBS
     "mode": None,          # "live" | None
     "proc": None,
     "sweep": None,
@@ -108,18 +260,63 @@ clients: set[WebSocket] = set()
 lock = threading.Lock()
 
 
+# O3+ / newer air units often ZC-lock and pass transport CRCs while the
+# turbo decode only recovers a 3-byte stub (length byte zero → truncated).
+# That is RF presence, not telemetry — publish as ENCR so the dashboard
+# shows the aircraft without inventing a serial or position.
+_ENCR_STUB_CLASSES = {
+    "decode_truncated_too_short",
+    "crc_valid_nonclassic_or_encrypted",
+}
+_encr_stub_at: dict[str, float] = {}
+
+
 def parse_line(line: str) -> dict | None:
     try:
         j = json.loads(line)
         p = bytes.fromhex(j["payload_hex"])
         classification = j.get("payload_classification")
+        crc_ok = bool(j.get("crc24a_ok") and j.get("dji_crc16_ok"))
+        # A decoded DroneID burst is at least the 91-byte classic O2 frame.
+        # A shorter payload is the head of a burst that failed to decode:
+        # the transport length byte was zero, so the "payload" is three
+        # bytes. The DJI CRC-16 over those three bytes can be zero by
+        # accident, and the CRC-24 covers the transport rather than the
+        # payload, so both checks pass and the stub looks like a valid
+        # detection. Every repeat of the same failed burst produces the
+        # same three bytes, so it passes every time.
+        if len(p) < MIN_DRONEID_PAYLOAD_BYTES:
+            if not crc_ok or classification not in _ENCR_STUB_CLASSES:
+                return None
+            sha = (j.get("payload_sha256") or "")[:12] or p.hex()
+            # Throttle identical stubs — O3+ can emit dozens per minute.
+            now = time.time()
+            last = _encr_stub_at.get(sha) or 0.0
+            if now - last < 2.0:
+                return None
+            _encr_stub_at[sha] = now
+            if len(_encr_stub_at) > 256:
+                for k, t in list(_encr_stub_at.items()):
+                    if now - t > 60:
+                        _encr_stub_at.pop(k, None)
+            return {
+                "time": j["event_time_utc"],
+                "freq": j["frequency_mhz"],
+                "marker": "ENCR",
+                "session": sha[:8],
+                "rssi": j.get("dwell_average_power_dbfs"),
+                "crc": True,
+                "sha": sha,
+                "mode": state["mode"],
+                "pclass": classification,
+            }
         evt = {
             "time": j["event_time_utc"],
             "freq": j["frequency_mhz"],
             "marker": p[2:6].decode("ascii", "replace"),
             "session": p[6:10].hex(),
             "rssi": j.get("dwell_average_power_dbfs"),
-            "crc": bool(j.get("crc24a_ok") and j.get("dji_crc16_ok")),
+            "crc": crc_ok,
             "sha": (j.get("payload_sha256") or "")[:12],
             "mode": state["mode"],
             "pclass": classification,
@@ -149,8 +346,7 @@ def parse_line(line: str) -> dict | None:
         return None
 
 
-DB = Path("/opt/watchtower-web/data/history.db")
-DB.parent.mkdir(parents=True, exist_ok=True)
+DB = Path(os.environ.get("WATCHTOWER_DB", "/opt/watchtower-web/data/history.db"))
 
 
 def db_conn() -> sqlite3.Connection:
@@ -228,6 +424,7 @@ def insert_event(evt: dict) -> None:
 
 
 def init_db() -> None:
+    DB.parent.mkdir(parents=True, exist_ok=True)
     with db_conn() as c:
         c.execute(
             """CREATE TABLE IF NOT EXISTS events (
@@ -380,6 +577,20 @@ def station_dict() -> dict:
     return station
 
 
+def hackrf_configured() -> dict:
+    """Which HackRF roles have a serial assigned.
+
+    The serials identify the operator's own hardware, so they are not in
+    the repository. A role with no serial cannot be addressed: libhackrf
+    is given an empty device string and opens nothing, so the loop must
+    not pretend the radio is there.
+    """
+    return {
+        "droneid": bool(HACKRF_DRONEID),
+        "hop": bool(HACKRF_HOP),
+    }
+
+
 def readiness() -> dict:
     """Boot/deploy self-check: missing demods and radios surface here, not as mystery silence."""
     problems: list[str] = []
@@ -389,10 +600,19 @@ def readiness() -> dict:
         path = BASE / f"{name}.py"
         if not path.exists():
             problems.append(f"{name}.py missing under {BASE}")
+    configured = hackrf_configured()
     present = {d["id"]: d for d in dongle_status()}
-    if not present.get("pro", {}).get("attached"):
+    if not configured["droneid"]:
+        problems.append(
+            "HackRF Pro (DroneID) serial not set — set hackrf_serials.droneid "
+            "in config.json or HACKRF_DRONEID in the environment")
+    elif not present.get("pro", {}).get("attached"):
         problems.append("HackRF Pro (DroneID) not attached")
-    if not present.get("one", {}).get("attached"):
+    if not configured["hop"]:
+        problems.append(
+            "HackRF One (ELRS/hop) serial not set — set hackrf_serials.hop "
+            "in config.json or HACKRF_HOP in the environment")
+    elif not present.get("one", {}).get("attached"):
         problems.append("HackRF One (ELRS/hop) not attached")
     if not present.get("c5", {}).get("attached"):
         problems.append("ESP32-C5 (RemoteID) not attached")
@@ -421,6 +641,16 @@ def status_dict() -> dict:
         "dongles": dongle_status(),
         "internet": state.get("internet"),
         "adsb_error": state.get("adsb_error"),
+        "adsb_network_error": state.get("adsb_network_error"),
+        "adsb_local_count": len(state.get("adsb_local") or []),
+        "adsb_network_count": len(state.get("adsb_network") or []),
+        "adsb_provider": state.get("adsb_provider") or (
+            "flightradar24" if str(CONFIG.get("fr24_api_token") or "").strip() else "adsb.lol"
+        ),
+        "replay_running": bool(state.get("replay_proc")),
+        "replay_published": state.get("replay_published") or 0,
+        "zc_thresholds": dict(zip(
+            ("root600", "root147"), zc_gate.thresholds(CONFIG))),
         "build": BUILD,
         "ready": ready["ok"],
         "problems": ready["problems"],
@@ -492,6 +722,9 @@ def dongle_status() -> list[dict]:
         out.append({
             "id": spec["id"], "label": spec["label"], "role": spec["role"],
             "attached": attached, "live": live,
+            # A HackRF with no serial assigned is a configuration gap, not
+            # a missing device: the dashboard shows it differently.
+            "configured": bool(spec.get("serial")) if spec["id"] in ("pro", "one") else True,
         })
     return out
 
@@ -688,6 +921,7 @@ def refresh_phase() -> None:
 
 def stop_everything() -> None:
     state["armed"] = False
+    save_armed(False)
     kill_proc(state.get("proc"))
     kill_proc(state.get("sweep"))
     state.update(running=False, mode=None, proc=None, sweep=None,
@@ -717,6 +951,7 @@ def tail_loop() -> None:
 def scan_start() -> dict:
     """Resume DroneID on the Pro and ELRS/TBS on the One."""
     state["armed"] = True
+    save_armed(True)
     if not state.get("started"):
         state["started"] = time.time()
     broadcast({"type": "status", "status": status_dict()})
@@ -726,6 +961,228 @@ def scan_start() -> dict:
 @app.post("/api/scan/stop")
 def scan_stop() -> dict:
     stop_everything()
+    broadcast({"type": "status", "status": status_dict()})
+    return {"ok": True}
+
+
+@app.get("/api/config/adsb")
+def get_adsb_config() -> dict:
+    """Public ADS-B network settings (FR24 token is never returned in full)."""
+    return adsb_config_public()
+
+
+@app.post("/api/config/adsb")
+async def set_adsb_config(body: dict) -> dict:
+    """Save an optional FlightRadar24 API token.
+
+    Non-empty token → network ADS-B uses FR24 only.
+    Empty token → fall back to adsb.lol / adsb.fi.
+    """
+    if "fr24_api_token" in body:
+        token = str(body.get("fr24_api_token") or "").strip()
+        CONFIG["fr24_api_token"] = token
+        save_config()
+        state["adsb_provider"] = adsb_provider()
+        # Force a fresh network pull on the next loop tick.
+        state["adsb_network"] = []
+        state["adsb_network_error"] = None
+        broadcast({"type": "status", "status": status_dict()})
+    return adsb_config_public()
+
+
+REPLAY_SCAN = Path("/opt/droneid-repo/src/droneid_hackrf_scanner.py")
+REPLAY_CAP = Path("/home/drone/droneid-results/replay")
+ELRS_CAPTURES = Path("/home/drone/elrs-captures")
+
+
+def replay_stop() -> None:
+    """Stop a running replay, if any."""
+    proc = state.get("replay_proc")
+    if proc and proc.poll() is None:
+        proc.send_signal(2)  # SIGINT — scanner clean shutdown
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    state["replay_proc"] = None
+    state["replay_run"] = None
+
+
+def replay_worker(path: Path, freq_hz: int, root600: float, root147: float) -> None:
+    """Run the scanner in replay mode and publish whatever it decodes.
+
+    This is the offline path: a recorded IQ file goes through exactly the
+    same detector and decoder as live air, so a threshold change can be
+    judged against real captures without any radio attached.
+    """
+    beat("replay")
+    run_dir = REPLAY_CAP / time.strftime("replay-%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "python3", str(REPLAY_SCAN),
+        "--replay", str(path),
+        "--replay-freq", str(freq_hz),
+        "--turbo-binary", TURBO,
+        "--root600-threshold", str(root600),
+        "--root147-threshold", str(root147),
+        "--output", str(run_dir),
+    ]
+    state["replay_run"] = run_dir
+    log = open(run_dir / "scanner.log", "w")
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    state["replay_proc"] = proc
+    detections = run_dir / "detections.jsonl"
+    seen = 0
+    published = 0
+    try:
+        while proc.poll() is None:
+            beat("replay")
+            if detections.exists():
+                lines = detections.read_text().splitlines()
+                for line in lines[seen:]:
+                    evt = parse_line(line)
+                    if evt and evt.get("crc"):
+                        evt["source"] = "droneid"
+                        evt["replay"] = True
+                        publish_event(evt)
+                        published += 1
+                seen = len(lines)
+            time.sleep(0.4)
+        # The scanner writes its last lines on the way out.
+        if detections.exists():
+            lines = detections.read_text().splitlines()
+            for line in lines[seen:]:
+                evt = parse_line(line)
+                if evt and evt.get("crc"):
+                    evt["source"] = "droneid"
+                    evt["replay"] = True
+                    publish_event(evt)
+                    published += 1
+    finally:
+        log.close()
+        if state.get("replay_proc") is proc:
+            state["replay_proc"] = None
+        state["replay_published"] = published
+        state["replay_run"] = None
+        beat("replay")
+        broadcast({"type": "status", "status": status_dict()})
+
+
+REPLAY_DENY_NAMES = frozenset({
+    ".ssh", ".aws", ".gnupg", ".config", ".hermes", ".kube", ".docker",
+    ".netrc", ".env", "auth.json", "config.json", "id_rsa", "id_ed25519",
+    "credentials", "known_hosts", ".git-credentials", "shadow", "passwd",
+})
+
+# A replay source is a recorded IQ capture, so it has a capture
+# extension. Requiring one keeps the home directory in the allowed roots
+# (the documented workflow drops a capture there) without turning the
+# endpoint into a reader for everything else in the home directory.
+REPLAY_EXTENSIONS = frozenset({
+    ".cs8", ".cf32", ".cfile", ".raw", ".iq", ".bin", ".npy",
+})
+
+
+def replay_allowed_roots() -> list[Path]:
+    """Directories a replay source may live in.
+
+    The replay endpoint takes a path from the client, so it must be
+    confined: without this, any caller can point the scanner at an
+    arbitrary file on the box and use the endpoint as a file-existence
+    oracle.
+
+    The capture roots are where the receivers actually write: the DroneID
+    results tree, the replay inbox, and the ELRS capture directory. The
+    station user's home is included because the documented workflow drops
+    a capture file there; sensitive names inside it are denied below.
+    """
+    roots = [RESULTS, REPLAY_CAP, ELRS_CAPTURES, Path.home()]
+    configured = CONFIG.get("replay_roots")
+    if isinstance(configured, list):
+        roots += [Path(p).expanduser() for p in configured if isinstance(p, str) and p]
+    return roots
+
+
+def _replay_denied(source: Path) -> bool:
+    """True when *source* touches a sensitive path or is not a capture."""
+    parts = source.parts
+    for part in parts:
+        if part.lower() in REPLAY_DENY_NAMES:
+            return True
+    name = source.name.lower()
+    if name.endswith((".pem", ".key", ".pfx", ".p12")):
+        return True
+    if name.startswith(".") and name not in (".cs8",):
+        return True
+    if source.suffix.lower() not in REPLAY_EXTENSIONS:
+        return True
+    return False
+
+
+def resolve_replay_source(raw: str) -> tuple[Path | None, str]:
+    """Resolve *raw* to a readable capture file inside an allowed root.
+
+    Returns ``(path, "")`` on success or ``(None, reason)`` on failure.
+    The reason never echoes a resolved filesystem path back to the caller.
+    """
+    if not raw or not raw.strip():
+        return None, "path is required"
+    try:
+        source = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None, "path could not be resolved"
+    allowed = []
+    for root in replay_allowed_roots():
+        try:
+            allowed.append(root.expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    if not any(source == root or source.is_relative_to(root) for root in allowed):
+        return None, "path is outside the allowed capture directories"
+    if _replay_denied(source):
+        return None, "path is not permitted"
+    if not source.is_file():
+        return None, "not a regular file"
+    return source, ""
+
+
+@app.post("/api/replay/start")
+def replay_start(path: str = "", freq_hz: int = 5756500000,
+                 root600: float = 0.0, root147: float = 0.0) -> dict:
+    """Replay a recorded IQ file through the live DroneID decoder.
+
+    ``path`` is an IQ file on the sensor box, confined to the capture
+    directories. ``freq_hz`` is the centre frequency the capture was taken
+    at. The threshold overrides let the same capture be judged against
+    several gates.
+    """
+    source, reason = resolve_replay_source(path)
+    if source is None:
+        return {"ok": False, "error": reason}
+    if not REPLAY_SCAN.exists():
+        return {"ok": False, "error": f"scanner not found: {REPLAY_SCAN}"}
+    default600, default147 = zc_gate.thresholds(CONFIG)
+    root600 = root600 if root600 > 0 else default600
+    root147 = root147 if root147 > 0 else default147
+    replay_stop()
+    state["replay_published"] = 0
+    threading.Thread(
+        target=replay_worker,
+        args=(source, int(freq_hz), float(root600), float(root147)),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "path": str(source),
+        "freq_hz": int(freq_hz),
+        "root600_threshold": float(root600),
+        "root147_threshold": float(root147),
+    }
+
+
+@app.post("/api/replay/stop")
+def replay_stop_endpoint() -> dict:
+    replay_stop()
     broadcast({"type": "status", "status": status_dict()})
     return {"ok": True}
 
@@ -741,6 +1198,8 @@ BEAT_BUDGET_S = {
     "droneid": 90,
     "retention": 120,
     "netgeo": 120,
+    "adsb_net": 90,
+    "replay": 300,
 }
 BEAT_BUDGET_DEFAULT_S = 60
 
@@ -831,13 +1290,72 @@ def _history_where(session: str, source: str, frm: str, to: str) -> tuple[str, l
     if source:
         q += " AND source=?"
         args.append(source)
+    # The date pickers show dates in the viewer's local time, so the day
+    # boundaries have to be local too. Stored timestamps are UTC, so the
+    # bounds are converted before the comparison.
+    tz = local_timezone()
     if frm:  # ISO date or datetime, lexicographic compare works on our stamps
         q += " AND time>=?"
-        args.append(frm if "T" in frm else frm + "T00:00:00")
+        args.append(_local_bound_to_utc(frm, tz, "start"))
     if to:
         q += " AND time<=?"
-        args.append(to if "T" in to else to + "T23:59:59.999999")
+        args.append(_local_bound_to_utc(to, tz, "end"))
     return q, args
+
+
+def _local_bound_to_utc(bound: str, tz, edge: str) -> str:
+    """Turn a local date (or datetime) boundary into the matching UTC stamp.
+
+    A bare date means the whole local day: "start" is midnight local,
+    "end" is the last instant of that day. A full datetime is taken as
+    given.
+    """
+    text = bound.strip()
+    if "T" in text:
+        try:
+            parsed = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            return text
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=tz)
+        return parsed.astimezone(datetime.timezone.utc).isoformat()
+    try:
+        day = datetime.date.fromisoformat(text)
+    except ValueError:
+        return text
+    if edge == "start":
+        local = datetime.datetime.combine(day, datetime.time.min, tzinfo=tz)
+    else:
+        local = datetime.datetime.combine(
+            day, datetime.time.max, tzinfo=tz)
+    return local.astimezone(datetime.timezone.utc).isoformat()
+
+
+def local_timezone():
+    """The station's timezone, as a tzinfo. Falls back to the system local
+    zone when the database is unavailable."""
+    try:
+        import zoneinfo
+        name = Path("/etc/timezone")
+        if name.exists():
+            return zoneinfo.ZoneInfo(name.read_text().strip())
+        return datetime.datetime.now().astimezone().tzinfo
+    except Exception:
+        return datetime.datetime.now().astimezone().tzinfo
+
+
+def to_local_iso(stamp: str | None, tz=None) -> str | None:
+    """Rewrite a stored UTC timestamp as an ISO string in local time."""
+    if not stamp:
+        return stamp
+    tz = tz or local_timezone()
+    try:
+        parsed = datetime.datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return stamp
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(tz).isoformat()
 
 
 @app.get("/api/history/events")
@@ -854,14 +1372,22 @@ def history_events(session: str = "", limit: int = 500, offset: int = 0,
 @app.get("/api/history/export")
 def history_export(session: str = "", source: str = "", frm: str = "",
                    to: str = "") -> StreamingResponse:
-    """Stream the filtered event history as CSV, row by row."""
+    """Stream the filtered event history as CSV, row by row.
+
+    The ``time`` column is written in the station's local time so the file
+    matches what the dashboard shows. Everything else is unchanged.
+    """
     q, args = _history_where(session, source, frm, to)
     q += " ORDER BY time DESC"
+    local_tz = local_timezone()
 
     def rows():
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(EVENT_COLS)
+        header = list(EVENT_COLS)
+        if header and header[0] == "time":
+            header[0] = "time_local"
+        w.writerow(header)
         yield buf.getvalue()
         buf.seek(0)
         buf.truncate(0)
@@ -872,7 +1398,9 @@ def history_export(session: str = "", source: str = "", frm: str = "",
                 if not batch:
                     break
                 for r in batch:
-                    w.writerow([r[k] for k in EVENT_COLS])
+                    values = [r[k] for k in EVENT_COLS]
+                    values[0] = to_local_iso(values[0], local_tz)
+                    w.writerow(values)
                 yield buf.getvalue()
                 buf.seek(0)
                 buf.truncate(0)
@@ -887,6 +1415,23 @@ def history_export(session: str = "", source: str = "", frm: str = "",
 @app.websocket("/ws")
 async def ws(ws: WebSocket) -> None:
     global loop
+    # The browser cannot set headers on a WebSocket, so the token has to
+    # arrive as a cookie or a query parameter. A wrong token closes the
+    # socket instead of subscribing it to the detection feed.
+    #
+    # The socket is accepted first and then closed with 4401: closing
+    # before the handshake completes is delivered to the browser as a
+    # plain HTTP 403 rejection, and the client cannot tell that apart
+    # from a network fault — so it would reconnect in a loop.
+    cookie = ws.cookies.get(TOKEN_COOKIE) or ""
+    query = ws.query_params.get("token") or ""
+    expected = api_token()
+    if expected:
+        supplied = cookie or query
+        if not supplied or not secrets.compare_digest(supplied, expected):
+            await ws.accept()
+            await ws.close(code=4401)
+            return
     await ws.accept()
     loop = asyncio.get_event_loop()
     clients.add(ws)
@@ -899,18 +1444,24 @@ async def ws(ws: WebSocket) -> None:
 
 
 def remoteid_event(drone: list) -> dict | None:
-    """Map a bkerler/DroneID macdb entry to a watchtower event."""
+    """Map a bkerler/DroneID macdb entry to a watchtower event.
+
+    Every string here is broadcast by the drone: the Basic ID serial, the
+    operator status, and the Self ID free text. They all reach the
+    dashboard, so they are constrained to a markup-free charset here,
+    at the trust boundary.
+    """
     mac, serial, pos, sysinfo, selfid = None, None, None, None, None
     for item in drone:
         if isinstance(item, dict):
             if "MAC" in item:
-                mac = item["MAC"]
+                mac = textsan.safe_label(item["MAC"])
             bid = item.get("Basic ID") or {}
             uas = bid.get("id") or bid.get("uas_id")
             if uas:
                 kind = str(bid.get("id_type", ""))
                 if serial is None or "Serial" in kind:
-                    serial = str(uas).strip()
+                    serial = textsan.safe_label(uas)
             if "Location Vector" in item:
                 c = item["Location Vector"].get("coord") or {}
                 if c.get("latitude") or c.get("longitude"):
@@ -920,14 +1471,14 @@ def remoteid_event(drone: list) -> dict | None:
                         "alt": (c.get("geodetic_altitude") or 0) / 1000,
                         "speed": c.get("speed", 0),
                         "dir": c.get("direction"),
-                        "status": item["Location Vector"].get("op_status"),
+                        "status": textsan.safe_label(item["Location Vector"].get("op_status")),
                     }
             if "System" in item:
                 s = item["System"]
                 if s.get("latitude") or s.get("longitude"):
                     sysinfo = {"op_lat": s["latitude"] / 1e7, "op_lon": s["longitude"] / 1e7}
             if "Self ID" in item:
-                selfid = item["Self ID"].get("text")
+                selfid = textsan.safe_label(item["Self ID"].get("text"))
     ident = serial or mac
     if not ident:
         return None
@@ -961,28 +1512,177 @@ def adsb_snapshot() -> list[dict]:
         if a.get("display_valid") is False:
             continue
         craft.append({
-            "hex": (a.get("hex") or "").upper(),
-            "flight": (a.get("flight") or a.get("callsign") or "").strip(),
-            "type": a.get("aircraft_type") or a.get("category_label") or "",
-            "category": a.get("category") or "",
+            "hex": textsan.safe_hex(a.get("hex")),
+            "flight": textsan.safe_label(a.get("flight") or a.get("callsign")),
+            "type": textsan.safe_label(a.get("aircraft_type") or a.get("category_label")),
+            "category": textsan.safe_label(a.get("category")),
             "alt_ft": a.get("alt_baro"),
             "gs_kt": a.get("gs"),
             "track": a.get("track"),
             "lat": a.get("lat"),
             "lon": a.get("lon"),
-            "squawk": a.get("squawk") or "",
+            "squawk": textsan.safe_label(a.get("squawk")),
             "seen": a.get("seen"),
             "messages": a.get("messages"),
             "distance_nm": a.get("distance_nm"),
             "country": a.get("country") or "",
             "last_seen": a.get("lastSeen") or "",
+            # This is what the box itself heard over the air.
+            "source": "1090",
+            "feed": "local",
         })
     return [c for c in craft if c["hex"]]
+
+
+def fr24_api_token() -> str:
+    return str(CONFIG.get("fr24_api_token") or "").strip()
+
+
+def adsb_provider() -> str:
+    return "flightradar24" if fr24_api_token() else "adsb.lol"
+
+
+def adsb_network_feeds() -> list[dict]:
+    """Aggregator feeds to poll.
+
+    A FlightRadar24 API token replaces the public adsb.lol / adsb.fi feeds.
+    With no token, the free aggregators stay in use.
+    """
+    token = fr24_api_token()
+    if token:
+        return [{
+            "name": "flightradar24",
+            "kind": "fr24",
+            "token": token,
+        }]
+    configured = CONFIG.get("adsb_network_feeds")
+    if configured is None:
+        return list(ADSB_NETWORK_FEEDS)
+    if not isinstance(configured, list):
+        return list(ADSB_NETWORK_FEEDS)
+    feeds = []
+    for entry in configured:
+        if isinstance(entry, dict) and entry.get("url"):
+            feeds.append({
+                "name": entry.get("name") or "net",
+                "url": entry["url"],
+                "key": entry.get("key") or "aircraft",
+            })
+    return feeds
+
+
+def adsb_config_public() -> dict:
+    token = fr24_api_token()
+    hint = ""
+    if token:
+        hint = ("*" * max(0, len(token) - 4)) + token[-4:]
+    return {
+        "provider": adsb_provider(),
+        "fr24_configured": bool(token),
+        "fr24_token_hint": hint,
+        "radius_nm": adsb_network_radius(),
+    }
+
+
+def adsb_network_radius() -> int:
+    try:
+        return max(1, int(CONFIG.get("adsb_network_radius_nm", ADSB_NETWORK_RADIUS_NM)))
+    except (TypeError, ValueError):
+        return ADSB_NETWORK_RADIUS_NM
+
+
+def annotate_adsb(tracks: list[dict]) -> list[dict]:
+    """Attach distance-from-station and the small-UAS heuristic to tracks."""
+    station = station_dict()
+    lat = station.get("lat")
+    lon = station.get("lon")
+    for track in tracks:
+        if lat is not None and lon is not None:
+            try:
+                track["distance_nm"] = round(
+                    adsb_network.haversine_nm(
+                        lat, lon, float(track["lat"]), float(track["lon"])), 2)
+            except (KeyError, TypeError, ValueError):
+                pass
+        track.update(adsb_classify.classify(track))
+    return tracks
+
+
+def adsb_snapshot_all() -> list[dict]:
+    """Local 1090 tracks merged with the network feeds.
+
+    The local receiver always wins a tie on ICAO hex: a track this box
+    received over the air is more trustworthy than the same aircraft seen
+    by an aggregator.
+    """
+    local = state.get("adsb_local") or []
+    network = state.get("adsb_network") or []
+    merged = adsb_network.merge_tracks(local, network)
+    return annotate_adsb(merged)
+
+
+def adsb_local_loop() -> None:
+    """Poll the local 1090 MHz receiver that feeds adsb1090."""
+    while True:
+        beat("adsb_local")
+        try:
+            local = adsb_snapshot()
+            state["adsb_local"] = local
+            state["adsb_ok"] = True
+            state["adsb_error"] = None
+        except Exception as exc:
+            state["adsb_ok"] = False
+            state["adsb_error"] = str(exc)
+        time.sleep(ADSB_POLL_INTERVAL_S)
+
+
+def adsb_network_loop() -> None:
+    """Poll network ADS-B (adsb.lol by default, or FlightRadar24 with a key).
+
+    These are not what this station received — they are what the
+    aggregator networks heard. Every track from here is tagged "net" so
+    the dashboard can keep the two apart. Feeds are re-read each cycle so
+    a newly saved FR24 token takes effect without a restart.
+    """
+    while True:
+        beat("adsb_net")
+        feeds = adsb_network_feeds()
+        state["adsb_provider"] = adsb_provider()
+        if not feeds:
+            state["adsb_network"] = []
+            time.sleep(ADSB_NETWORK_INTERVAL_S)
+            continue
+        station = station_dict()
+        lat, lon = station.get("lat"), station.get("lon")
+        if lat is None or lon is None:
+            state["adsb_network"] = []
+            time.sleep(ADSB_NETWORK_INTERVAL_S)
+            continue
+        try:
+            tracks = adsb_network.collect(
+                lat, lon, adsb_network_radius(), feeds)
+            state["adsb_network"] = tracks
+            state["adsb_network_error"] = None
+        except Exception as exc:
+            state["adsb_network_error"] = str(exc)
+        time.sleep(ADSB_NETWORK_INTERVAL_S)
+
+
+def adsb_loop() -> None:
+    """Push the merged ADS-B picture to the dashboard."""
+    while True:
+        beat("adsb")
+        broadcast({"type": "adsb", "aircraft": adsb_snapshot_all()})
+        time.sleep(ADSB_POLL_INTERVAL_S)
 
 
 def hop_survey(freq_span: str, lo: float, hi: float, min_span: float, min_bursts: int, band: str) -> dict:
     """Burst-hop presence inside one band. No control-channel contents."""
     if not state.get("armed"):
+        return {"present": False, "busy": False, "band": band}
+    if not HACKRF_HOP:
+        # No serial assigned to the hopping tuner, so libhackrf would be
+        # handed an empty device string and open nothing.
         return {"present": False, "busy": False, "band": band}
     try:
         proc = subprocess.Popen(
@@ -1054,62 +1754,79 @@ def elrs_survey() -> dict:
 def elrs_demod_pass() -> dict:
     """ELRS turn: fast sweep gate, then packet-level demod on the HackRF One.
 
-    The sweep gate is only a trigger — Wi-Fi energy can satisfy it on its own.
-    Once the demod has run, only verified ELRS packets make the row appear.
+    The sweep gate is only a trigger — Wi-Fi / O3 energy can satisfy it on its
+    own. Try several candidate centers (last verified first) so continuous
+    OcuSync does not permanently steal the capture frequency. Only verified
+    ELRS packets make the live row appear.
     """
     gate = elrs_survey()
     if not gate.get("present") or DEMOD is None:
         return {"present": False, "band": "2.4 GHz"}
     try:
-        center = DEMOD.sweep_best_center()
-        if center is None:
+        centers = DEMOD.sweep_candidate_centers(3)
+        if not centers:
             return {"present": False, "band": "2.4 GHz"}
-        iq_path = DEMOD.capture(center, 8)
-        if not iq_path:
+        radio_busy = False
+        for center in centers:
+            iq_path = DEMOD.capture(center, 5)
+            if not iq_path:
+                radio_busy = True
+                continue
+            try:
+                sig = DEMOD.load_baseband(iq_path)
+            finally:
+                try:
+                    os.remove(iq_path)
+                except OSError:
+                    pass
+            counts: dict[int, int] = {}
+            best_snr = None
+            downs = 0
+            for sf in DEMOD.SF_LIST:
+                for inverted in (False, True):
+                    for p in DEMOD.scan_polarity(sig, sf, inverted):
+                        if p["sync"] != [8, 16] or not p["downchirps_ok"]:
+                            continue
+                        if inverted:
+                            downs += 1
+                        counts[sf] = counts.get(sf, 0) + 1
+                        if best_snr is None or p["snr_db"] > best_snr:
+                            best_snr = p["snr_db"]
+            del sig
+            if not counts:
+                print(
+                    f"elrs: energy at {round(center / 1e6, 1)} MHz but no LoRa sync",
+                    flush=True,
+                )
+                continue
+            sf = max(counts, key=lambda k: counts[k])
+            DEMOD.note_center(center)
+            out = {
+                "present": True,
+                "band": "2.4 GHz",
+                "modulation": f"LoRa SF{sf}",
+                "rate": ELRS_RATES.get(sf, "ELRS"),
+                "packets": sum(counts.values()),
+                "snr_db": best_snr,
+                "downlink": downs,
+                "freq_mhz": round(center / 1e6, 1),
+            }
+            try:
+                insert_event({
+                    "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "session": "elrs-2g4",
+                    "source": "elrs",
+                    "marker": f"ELRS {out['rate']}",
+                    "freq": out["freq_mhz"],
+                    "rssi": best_snr,
+                    "lat": None, "lon": None, "alt": None, "crc": True,
+                })
+            except Exception as exc:
+                print(f"elrs history insert failed: {exc}", flush=True)
+            return out
+        if radio_busy:
             return gate                            # radio busy; keep last word
-        try:
-            sig = DEMOD.load_baseband(iq_path)
-        finally:
-            os.remove(iq_path)
-        counts: dict[int, int] = {}
-        best_snr = None
-        downs = 0
-        for sf in DEMOD.SF_LIST:
-            for inverted in (False, True):
-                for p in DEMOD.scan_polarity(sig, sf, inverted):
-                    if p["sync"] != [8, 16] or not p["downchirps_ok"]:
-                        continue
-                    if inverted:
-                        downs += 1
-                    counts[sf] = counts.get(sf, 0) + 1
-                    if best_snr is None or p["snr_db"] > best_snr:
-                        best_snr = p["snr_db"]
-        del sig
-        if not counts:
-            return {"present": False, "band": "2.4 GHz"}   # energy, but not ELRS
-        sf = max(counts, key=lambda k: counts[k])
-        out = {
-            "present": True,
-            "band": "2.4 GHz",
-            "modulation": f"LoRa SF{sf}",
-            "rate": ELRS_RATES.get(sf, "ELRS"),
-            "packets": sum(counts.values()),
-            "snr_db": best_snr,
-            "downlink": downs,
-        }
-        try:
-            insert_event({
-                "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "session": "elrs-2g4",
-                "source": "elrs",
-                "marker": f"ELRS {out['rate']}",
-                "freq": round(center / 1e6, 1),
-                "rssi": best_snr,
-                "lat": None, "lon": None, "alt": None, "crc": True,
-            })
-        except Exception as exc:
-            print(f"elrs history insert failed: {exc}", flush=True)
-        return out
+        return {"present": False, "band": "2.4 GHz"}   # energy, but not ELRS
     except Exception as exc:
         print(f"elrs demod pass failed: {exc}", flush=True)
         return gate
@@ -1216,6 +1933,9 @@ def mavlink_rf_pass() -> list[dict]:
     """HackRF One turn: narrow 433/915 FSK → MAVLink frames."""
     if not state.get("armed") or MAV is None:
         return mavlink_snapshot()
+    if not HACKRF_HOP:
+        # No serial assigned to the hopping tuner.
+        return mavlink_snapshot()
     try:
         found = MAV.pass_rf(HACKRF_HOP)
     except Exception as exc:
@@ -1255,7 +1975,11 @@ def droneid_loop() -> None:
         if not state.get("armed"):
             time.sleep(0.3)
             continue
-        pro_present = any(d["serial"] == HACKRF_DRONEID for d in usb_devices())
+        pro_present = any(
+            d["serial"] == HACKRF_DRONEID
+            for d in usb_devices()
+            if HACKRF_DRONEID and d["serial"]
+        )
         if not pro_present:
             state["phase_droneid"] = None
             refresh_phase()
@@ -1283,6 +2007,7 @@ def droneid_loop() -> None:
         dwell = CONFIG.get("scanner_dwell")
         if dwell:
             cmd += ["--dwell", str(dwell)]
+        cmd += zc_gate.cli_args(CONFIG)
         state.update(running=True, mode="live", phase_droneid="DroneID", run_dir=out)
         refresh_phase()
         log = open(out / "scanner.log", "w")
@@ -1554,23 +2279,6 @@ def hop_loop() -> None:
         broadcast({"type": "vtx", "links": shown_links})
 
 
-def adsb_loop() -> None:
-    """Push the 1090 MHz picture to the dashboard. Failures just wait and retry."""
-    while True:
-        beat("adsb")
-        try:
-            craft = adsb_snapshot()
-            state["adsb_ok"] = True
-            state["adsb_error"] = None
-        except Exception as exc:
-            state["adsb_ok"] = False
-            state["adsb_error"] = str(exc)
-            time.sleep(5)
-            continue
-        broadcast({"type": "adsb", "aircraft": craft})
-        time.sleep(2)
-
-
 def remoteid_loop(endpoint: str) -> None:
     if not HAVE_ZMQ:
         return
@@ -1635,6 +2343,8 @@ def startup() -> None:
     threading.Thread(target=gps_loop, daemon=True).start()
     threading.Thread(target=usb_cam_loop, daemon=True).start()
     threading.Thread(target=adsb_loop, daemon=True).start()
+    threading.Thread(target=adsb_local_loop, daemon=True).start()
+    threading.Thread(target=adsb_network_loop, daemon=True).start()
     threading.Thread(target=droneid_loop, daemon=True).start()
     threading.Thread(target=hop_loop, daemon=True).start()
     threading.Thread(target=mavlink_udp_loop, daemon=True).start()
@@ -1644,4 +2354,20 @@ def startup() -> None:
         threading.Thread(target=remoteid_loop, args=(endpoint,), daemon=True).start()
 
 
-app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="frontend")
+class NoCacheStaticFiles(StaticFiles):
+    """Static files without caching.
+
+    The dashboard reloads itself when the server reports a newer build,
+    but a browser that kept the old app.js in memory would never see
+    that. Serving the assets without cache headers means a reload
+    always picks up the code that is actually deployed.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND), html=True), name="frontend")

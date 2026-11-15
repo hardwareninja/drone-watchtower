@@ -2,22 +2,6 @@
 
 Passive receiver for nearby drones and crewed aircraft. It listens, it does not transmit, jam, or take control of a link. The dashboard is a browser on port 8080.
 
-## Dashboard
-
-Open `http://<sensor>:8080`. The page has two working views. The captures below were taken with no radios plugged in, so those chips are red and the marker is a network location.
-
-**Live Monitoring** is the operator picture. The green marker is this station. The top row is the radios: a red chip means that receiver is missing or offline, and a green chip means it is up. The left column lists drones heard on DroneID or Remote ID, and crewed aircraft from ADS-B. **Stop scan** pauses DroneID and the HackRF hop; **Start scan** resumes them. Select a row to see the packet detail on the right.
-
-![Live monitoring map with the station marker and radio status](docs/screenshots/live-monitoring.png)
-
-The station starts where this machine appears on the public network. Click the marker to see that source. When the u-blox receiver has a fix, the same marker moves onto the GPS position.
-
-![Station popup showing a network location](docs/screenshots/station-location.png)
-
-**Events** is the detection log. Filter by protocol and date, export CSV, or show the same rows on the map. Each row keeps the time, identifier, protocol, marker, frequency, and level.
-
-![Events view with one DroneID history row](docs/screenshots/events.png)
-
 ## Hardware
 
 ### Required
@@ -57,6 +41,7 @@ Receive only. Ranges are the ones the station tunes; a transmitter outside them 
 | SiK / RFD900-style MAVLink | 433 MHz and 902–928 MHz GFSK, default air rate 64 kbit/s, sync `2D D4`, PN9 whitening | Radio presence and netid. Plain MAVLink (heartbeat, GPS, attitude, battery) when the payload is not encrypted | HUD fields when the radio uses an encrypted or non-MAVLink payload |
 | Analog FPV video | 5.8 GHz, 40-channel table | Carrier, channel name, and the USB grabber picture | — |
 | ADS-B | 1090 MHz | Hex, callsign, position, altitude, speed | Aircraft with no position yet are omitted |
+| ADS-B (network) | Aggregator feeds | The same fields, tagged `NET` | Nothing is decrypted; these are tracks an aggregator heard, not this box |
 | Station GPS | u-blox NMEA | Station latitude and longitude after a fix | — |
 
 The HackRF One does not listen to all of those at once. While scanning, it cycles ELRS, Crossfire, SiK, then the 5.8 GHz video survey. The HackRF Pro, when attached, stays on DroneID.
@@ -74,6 +59,83 @@ The HackRF One does not listen to all of those at once. While scanning, it cycle
 - ADS-B needs a view of the sky. Indoor, the RTL-SDR can be healthy and still report no aircraft.
 - Analog picture requires the goggle receiver and the USB grabber. The HackRF only reports the video carrier.
 - The aircraft registry in `config.json` is a display name for a serial you already know. It does not filter other aircraft out.
+- ADS-B tracks tagged `NET` came from a public aggregator, not from this station's receiver. They are listed so the panel is useful when no RTL-SDR is attached; they are never presented as local reception.
+- The `UAS?` badge is a heuristic over ADS-B fields (no callsign, no registration, no ICAO identity, low and slow, hovering). It marks a candidate worth looking at, not a confirmed drone.
+
+## Running without a radio
+
+The box stays useful with no SDR attached:
+
+- **Network ADS-B.** `adsb_network_feeds` in `config.json` lists aggregator feeds to poll. Set it to `[]` to turn them off.
+- **Offline replay.** `POST /api/replay/start?path=<file>&freq_hz=<hz>` runs a recorded IQ file through the same detector and decoder as live air, and pushes the frames to the dashboard as they are decoded. Threshold overrides (`root600`, `root147`) let the same capture be judged against several gates.
+
+  The path must sit inside a capture directory: the DroneID results tree, the replay inbox, the ELRS capture directory, or the station user's home. Add more with `replay_roots` in `config.json`. A path outside those roots is refused, and the error never echoes a resolved path back.
+
+  ```bash
+  curl -X POST "http://<host>:8080/api/replay/start?path=/home/drone/replay.cs8&freq_hz=5756500000"
+  curl -X POST "http://<host>:8080/api/replay/start?path=/home/drone/replay.cs8&freq_hz=5756500000&root600=0.45&root147=0.35"
+  ```
+
+- **MAVLink over UDP.** Frames sent to port 14550 or 14555 appear as vehicles. This is how a ground station or a companion computer feeds the dashboard.
+
+## Access control
+
+The dashboard listens on the LAN, so it is a control plane on a network the
+drone operator does not own: any neighbour on the segment can read the
+detection history — a geolocated log of every drone and crewed aircraft seen
+near the station — or stop the scan.
+
+**No token is required by default.** A station that asks for a token on every
+page load is a station people end up leaving unlocked, and the operator
+reading the dashboard is the whole point.
+
+Two ways to close the exposure, in order of preference:
+
+**Bind loopback and use an SSH tunnel.** Change the `--host` in the systemd
+unit to `127.0.0.1` and reach the dashboard over the tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 drone@drone.local
+```
+
+**Or require a token.** `webapp/deploy-kali.sh` generates one when
+`WATCHTOWER_REQUIRE_TOKEN=1` is set, stores it in `/etc/watchtower/env`
+(readable by the service, not by the webapp user), and prints it once. Put
+it in `WATCHTOWER_TOKEN` in the environment, or `api_token` in `config.json`.
+
+The browser asks for the token on the first `401` and remembers it; `curl`
+calls send it as `X-Watchtower-Token:`, `Authorization: Bearer <token>`, or
+the `watchtower_token` cookie. The websocket takes it from the cookie,
+because a browser cannot set headers on a WebSocket and a URL would write it
+into the server's access log.
+
+## Radios
+
+The HackRF serials are not in the repository — they identify the operator's
+own hardware. Set them once per box, either in the environment or in
+`config.json`:
+
+```json
+"hackrf_serials": {
+  "droneid": "<the DroneID tuner serial>",
+  "hop": "<the hopping tuner serial>"
+}
+```
+
+`HACKRF_DRONEID` and `HACKRF_HOP` override the config. The dashboard reports
+the radios as unassigned until they are set. `hackrf_roles` maps a serial to a
+role if the Pro and the One swap jobs.
+
+## Detection tuning
+
+The DroneID decoder is the expensive stage, so candidates are gated on their ZC correlation scores before it runs. The gate is tuned against a labeled corpus of 162 archived detector candidates (111 genuine frames, 51 CRC failures) kept in `tests/data/zc_score_corpus.json`.
+
+| Gate (root600 / root147) | Genuine frames kept | CRC failures reaching the decoder |
+|---|---|---|
+| 0.45 / 0.35 (previous default) | 111/111 | 51/51 — none rejected |
+| 0.55 / 0.50 (current default) | 109/111 | 6/51 |
+
+Rejected candidates never reach the decoder, so the CPU they would have cost goes into dwell time on real signals. Set `scanner_root600_threshold` and `scanner_root147_threshold` in `config.json` to change the gate; `pytest tests/test_zc_gate.py` re-checks the numbers above.
 
 ## Installation
 
@@ -113,9 +175,25 @@ Tested path: Raspberry Pi OS Bookworm 64-bit, or Kali ARM64, on the machine that
 
 7. For ADS-B, run an RTL-SDR 1090 decoder that serves `/api/aircraft` on `127.0.0.1:8091`. The dashboard polls that URL. The installer does not start that decoder.
 
-8. Open `http://<pi-address>:8080`. Start Scan. Arm the aircraft you expect to hear on DroneID.
+8. Open `http://drone.local:8080`. Start Scan. Arm the aircraft you expect to hear on DroneID.
+
+### Finding the sensor box
+
+The address moves when the sensor is a virtual machine on a changing
+network, so do not hard-code it. From your laptop:
+
+```bash
+bash scripts/find-watchtower.sh
+```
+
+It prints the dashboard URL and the SSH command. When the sensor is a
+VMware guest on the host's NAT network the address is fixed at
+`192.168.252.134`, and the installer sets that address so it survives
+reboots and network changes.
 
 History is SQLite at `/opt/watchtower-web/data/history.db`.
+
+Event timestamps are stored in UTC and displayed in the browser's own timezone, so a machine set to UTC+8 sees UTC+8. The Events tab date pickers work in local days as well, and the CSV export writes local time with its offset.
 
 ## Research enhancements (`src/`)
 
@@ -129,3 +207,14 @@ PYTHONPATH=src python -c "from main import EnhancedDroneWatchtower; ..."
 ```
 
 Live fusion (Task 2.1) is also wired into the dashboard: RID + DroneID sessions with the same serial merge in `webapp/frontend/app.js`, and the C5 firmware joins BLE Basic ID ↔ Location via a per-MAC cache.
+
+## Testing
+
+```bash
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+The suite covers the ZC gate against the labeled corpus (`tests/test_zc_gate.py`), the network ADS-B mapping and distance maths (`tests/test_adsb_network.py`), the small-UAS heuristic (`tests/test_adsb_classify.py`), MAVLink payload decoding (`tests/test_mavlink_decode.py`), and station positioning (`tests/test_station_location.py`).
+
+Backend code is importable in tests: `WATCHTOWER_DB` overrides the history database path, and the database directory is created on startup rather than at import.

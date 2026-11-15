@@ -20,7 +20,7 @@ import urllib.request
 
 import numpy as np
 
-ONE = "0000000000000000a06063c82451835f"
+ONE = os.environ.get("HACKRF_HOP", "")
 API = "http://127.0.0.1:8080"
 OUT = "/home/drone/elrs-captures"
 
@@ -34,6 +34,10 @@ MAX_RUN = 90                 # preamble is 12-14 symbols; longer = spur
 EDGE_SKIP = 3                # ignore bins near 0 and N-1 (DC / filter edge)
 MAX_PAYLOAD_SYMS = 48
 
+# Last center that yielded verified ELRS packets. Prefer this when O3/Wi-Fi
+# floods 2.4 GHz and the loudest bin is not the LoRa hop.
+LAST_CENTER_HZ = 2_421_725_000  # last verified ~2421.6 MHz; updated by note_center()
+
 
 def post(path):
     req = urllib.request.Request(API + path, method="POST")
@@ -41,11 +45,20 @@ def post(path):
         return r.read().decode()
 
 
-def sweep_best_center():
-    """Pick a hop frequency away from Wi-Fi channel centers."""
+def _bin_to_center_hz(mhz: float) -> int:
+    return int(mhz * 1e6 + 125_000)
+
+
+def sweep_candidate_centers(limit: int = 3) -> list[int]:
+    """Rank bursty 2.4 GHz bins away from Wi-Fi centers; return top centers.
+
+    Continuous OcuSync/Wi-Fi energy often wins a pure peak-power pick and
+    starves the ELRS demod. Prefer peak-minus-average (hoppy) bins and keep
+    the last verified ELRS center at the front of the list.
+    """
     out = subprocess.run(
         ["hackrf_sweep", "-d", ONE, "-f", "2400:2483", "-w", "250000",
-         "-l", "32", "-g", "24", "-N", "8", "-r", "-"],
+         "-l", "32", "-g", "24", "-N", "6", "-r", "-"],
         capture_output=True, text=True, timeout=120,
     )
     bins, vals = {}, []
@@ -64,22 +77,53 @@ def sweep_best_center():
             bins.setdefault(mhz, []).append(db)
             vals.append(db)
     if not vals:
-        return None
+        return [LAST_CENTER_HZ] if LAST_CENTER_HZ else []
     vals.sort()
     floor = vals[len(vals) // 2]
-    best = None
+    cands = []
     for mhz, dbs in bins.items():
         peak = max(dbs)
-        if peak <= floor + 15 or not (2415 <= mhz <= 2475):
+        avg = sum(dbs) / len(dbs)
+        if peak <= floor + 12 or not (2415 <= mhz <= 2475):
             continue
         nearest = min(abs(mhz - (2412 + 20 * k)) for k in range(13))
-        score = peak - (25 if nearest < 8 else 0)
-        if best is None or score > best[0]:
-            best = (score, mhz, peak)
-    if best is None:
-        return None
-    print(f"sweep floor {round(floor,1)} dB, chosen bin {best[1]} MHz (peak {round(best[2],1)} dB)")
-    return int(best[1] * 1e6 + 125_000)
+        burst = peak - avg
+        # Continuous carriers score poorly; LoRa hops look bursty across sweeps.
+        wifi_pen = 30 if nearest < 6 else (14 if nearest < 10 else 0)
+        score = peak + 1.6 * burst - wifi_pen
+        cands.append((score, mhz, peak, burst))
+    cands.sort(reverse=True)
+    centers: list[int] = []
+    if LAST_CENTER_HZ:
+        centers.append(LAST_CENTER_HZ)
+    for _score, mhz, peak, burst in cands[: max(limit, 1)]:
+        hz = _bin_to_center_hz(mhz)
+        if hz in centers:
+            continue
+        centers.append(hz)
+        print(
+            f"sweep floor {round(floor, 1)} dB, candidate {mhz} MHz "
+            f"(peak {round(peak, 1)} dB, burst {round(burst, 1)} dB)",
+            flush=True,
+        )
+        if len(centers) >= limit + (1 if LAST_CENTER_HZ else 0):
+            break
+    if not centers and cands:
+        centers.append(_bin_to_center_hz(cands[0][1]))
+    return centers[: limit + (1 if LAST_CENTER_HZ else 0)]
+
+
+def sweep_best_center():
+    """Pick a hop frequency away from Wi-Fi channel centers."""
+    centers = sweep_candidate_centers(1)
+    return centers[0] if centers else None
+
+
+def note_center(center_hz: int | None) -> None:
+    """Remember a verified ELRS capture center for the next hop turn."""
+    global LAST_CENTER_HZ
+    if center_hz:
+        LAST_CENTER_HZ = int(center_hz)
 
 
 def capture(center, seconds):

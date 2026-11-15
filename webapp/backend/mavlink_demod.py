@@ -11,6 +11,7 @@ Usage: python3 mavlink_demod.py --selftest
 from __future__ import annotations
 
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -25,7 +26,10 @@ except ImportError:
     HAVE_NP = False
     np = None
 
-ONE = os.environ.get("HACKRF_HOP", "0000000000000000a06063c82451835f")
+ONE = os.environ.get("HACKRF_HOP", "")
+# STATUSTEXT charset: printable text without markup characters.
+# Angle brackets are excluded so the value cannot open a tag in the DOM.
+_SAFE_TEXT = re.compile(r"[^A-Za-z0-9 .\-_/:;,()\[\]+@#*%&'\"=!?|~]")
 FS_CAP = 2_000_000
 FS_WB = 8_000_000
 IQ_PATH = "/tmp/mavlink-demod.iq"
@@ -91,15 +95,22 @@ def decode_payload(msgid: int, payload: bytes) -> dict:
         out["voltage"] = round(vals[9] / 1000.0, 2) if vals[9] not in (0, 65535) else None
         rem = vals[12] if len(payload) > 30 else -1
         out["battery_pct"] = rem if 0 <= rem <= 100 else None
-    elif msgid == 24 and len(payload) >= 30:
-        raw = struct.unpack_from("<QBiiiHHHHB", payload, 0)
-        fix, lat, lon, alt, sats = raw[1], raw[2], raw[3], raw[4], raw[9]
+    elif msgid == 24 and len(payload) >= 35:
+        # GPS_RAW_INT: time_us(Q) fix(B) lat(i) lon(i) alt_mm(i) eph(H)
+        # epv(H) vel_cms(H) cog_cdeg(H) vel_v_cms(H) hdg_cdeg(H) sats(H)
+        raw = struct.unpack_from("<QBiiiHHHHHHH", payload, 0)
+        fix, lat, lon, alt = raw[1], raw[2], raw[3], raw[4]
+        cog_cdeg, hdg_cdeg, sats = raw[8], raw[10], raw[11]
         if abs(lat) <= 900000000 and abs(lon) <= 1800000000 and (lat or lon):
             out["lat"] = round(lat / 1e7, 7)
             out["lon"] = round(lon / 1e7, 7)
             out["alt_m"] = round(alt / 1000.0, 1)
         out["fix"] = fix
         out["sats"] = sats
+        if hdg_cdeg != 65535:
+            out["heading"] = round(hdg_cdeg / 100.0, 1)
+        if cog_cdeg != 65535:
+            out["track"] = round(cog_cdeg / 100.0, 1)
     elif msgid == 33 and len(payload) >= 28:
         _, lat, lon, alt, rel, vx, vy, vz, hdg = struct.unpack_from("<IiiiihhhH", payload, 0)
         if abs(lat) <= 900000000 and abs(lon) <= 1800000000 and (lat or lon):
@@ -133,6 +144,10 @@ def decode_payload(msgid: int, payload: bytes) -> dict:
         out["link_remrssi"] = rem
     elif msgid == 253 and len(payload) >= 1:
         text = payload[1:51].split(b"\x00", 1)[0].decode("ascii", "replace")
+        # STATUSTEXT is chosen by whoever is on the air and reaches the
+        # dashboard, so constrain it to a markup-free charset here, at the
+        # decoder, rather than at each render site.
+        text = _SAFE_TEXT.sub("", "".join(c for c in text if c.isprintable())).strip()
         if text:
             out["statustext"] = text[:80]
     return out
@@ -665,15 +680,10 @@ def public_vehicle(v: dict) -> dict:
 
 
 def pass_rf(serial: str = ONE) -> list[dict]:
-    """One RF turn: short 915/433 captures, burst-gate, demod SiK/MAVLink.
-
-    Kept deliberately light so the HackRF One hop (ELRS→TBS→MAVLink→VTX)
-    does not stall for minutes on empty air.
-    """
+    """One RF turn: short 915/433 captures, burst-gate, demod SiK/MAVLink."""
     if not HAVE_NP:
         return []
     acc: dict[int, dict] = {}
-    # 2 Msps is enough for SiK channelize; 8 Msps wideband was too heavy on ARM.
     plans = (
         (915_000_000, FS_CAP, 0.6, 915.0),
         (433_920_000, FS_CAP, 0.4, 433.92),
@@ -684,6 +694,7 @@ def pass_rf(serial: str = ONE) -> list[dict]:
         if not path:
             continue
         sig = None
+        bursts = []
         try:
             sig = load_iq(path)
             bursts = energy_bursts(sig, fs) if sig is not None else []
@@ -693,7 +704,7 @@ def pass_rf(serial: str = ONE) -> list[dict]:
                 os.remove(path)
             except OSError:
                 pass
-        nburst = len(bursts) if sig is not None else 0
+        nburst = len(bursts)
         nids = sorted({fr.get("sik_netid") for fr in frames if fr.get("sik_netid")})
         print(f"mavlink {label} MHz bursts {nburst} → {len(frames)} frames "
               f"netid {nids} ({time.time() - t0:.1f}s)", flush=True)

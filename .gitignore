@@ -2,6 +2,14 @@
 captures/*
 !captures/.gitkeep
 
+# Decoder output and raw capture trees. These are regenerated on every
+# scan and are the bulk of the clone size; keep a trimmed sample under
+# tests/data/ instead.
+results/
+data/raw/**
+!data/raw/**/
+!**/.gitkeep
+
 # Python
 __pycache__/
 *.pyc
@@ -18,9 +26,15 @@ known_hosts
 *.cf32
 *.cfile
 *.raw
+*.iq
+*.npy
+*.bin
 third_party/*/
 
 # ESP-IDF build output
 firmware/**/build/
 firmware/**/sdkconfig
 firmware/**/sdkconfig.old
+
+# ZCode session artifacts
+.zcode/

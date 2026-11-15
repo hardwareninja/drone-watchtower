@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Drone Watchtower — Live Detection</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="style.css?v=rfscan5">
+  <link rel="stylesheet" href="style.css?v=fr24a">
 </head>
 <body>
   <header id="topbar">
@@ -46,6 +46,26 @@
     </div>
   </div>
   <div id="ready-banner" class="hidden"></div>
+
+  <!-- Access token. Shown when the station requires one; the page
+       cannot do anything useful until it is entered. -->
+  <div id="token-box" class="hidden">
+    <form id="token-form">
+      <label for="token-input">This station requires an access token</label>
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false"
+             placeholder="paste the token">
+      <div class="token-actions">
+        <button type="submit" id="token-submit">Unlock</button>
+        <button type="button" id="token-cancel">Cancel</button>
+      </div>
+      <div id="token-error" class="token-error"></div>
+      <div class="token-hint">
+        The token is in <code>/etc/watchtower/token</code> on the station box,
+        or in the deploy log.
+      </div>
+    </form>
+  </div>
+  <div id="heli-banner" class="hidden">Helicopter detected — ADS-B</div>
   <div id="banner" class="hidden">Drone detected — DroneID telemetry active</div>
 
   <main>
@@ -57,12 +77,19 @@
         </div>
         <div id="alert-list"></div>
       </section>
-      <section class="dash dash-adsb">
+      <section class="dash dash-heli">
         <div class="side-head">
-          <span>ADS-B 1090</span>
-          <span id="adsb-count" class="dim">0</span>
+          <span>Helicopter alert</span>
+          <span id="heli-count" class="dim">0</span>
         </div>
-        <div id="adsb-list"></div>
+        <div class="fr24-box" title="Optional FlightRadar24 API token. Empty = adsb.lol">
+          <label for="fr24-key">FR24 API</label>
+          <input id="fr24-key" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="optional key — else adsb.lol">
+          <button id="fr24-save" class="ghost" type="button">Save</button>
+          <span id="fr24-status" class="dim">adsb.lol</span>
+        </div>
+        <div id="heli-list"></div>
       </section>
     </aside>
 
@@ -77,8 +104,8 @@
           <option value="mavlink">MAVLink</option>
           <option value="vtx">VTX</option>
         </select>
-        <input type="date" id="hist-from" title="From (UTC)">
-        <input type="date" id="hist-to" title="To (UTC)">
+        <input type="date" id="hist-from" title="From (local date)">
+        <input type="date" id="hist-to" title="To (local date)">
         <button id="hist-map" class="ghost">Show map</button>
         <button id="hist-export" class="ghost">Export CSV</button>
         <button id="hist-more" class="ghost">Load more</button>
@@ -112,6 +139,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=rfscan5"></script>
+  <script src="app.js?v=token1"></script>
 </body>
 </html>

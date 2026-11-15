@@ -104,6 +104,54 @@ if command -v avahi-daemon >/dev/null 2>&1 || apt-get install -y --no-install-re
   systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
 fi
 
+# A fixed address. When this box is a VMware guest on the host's NAT
+# network, a DHCP lease changes whenever the host moves between networks,
+# which makes the dashboard address a moving target. Setting the address
+# manually keeps it the same across reboots and network changes.
+# Override with WATCHTOWER_IP / WATCHTOWER_GATEWAY / WATCHTOWER_PREFIX.
+STATIC_IP="${WATCHTOWER_IP:-192.168.252.134}"
+STATIC_GATEWAY="${WATCHTOWER_GATEWAY:-192.168.252.2}"
+STATIC_PREFIX="${WATCHTOWER_PREFIX:-24}"
+CON_NAME="${WATCHTOWER_CONN:-Wired connection 1}"
+if command -v nmcli >/dev/null 2>&1; then
+  if nmcli -t -f NAME con show 2>/dev/null | grep -qx "$CON_NAME"; then
+    echo "    setting a fixed address: ${STATIC_IP}/${STATIC_PREFIX} via ${STATIC_GATEWAY}"
+    nmcli con mod "$CON_NAME" \
+      ipv4.method manual \
+      ipv4.addresses "${STATIC_IP}/${STATIC_PREFIX}" \
+      ipv4.gateway "$STATIC_GATEWAY" \
+      ipv4.dns "$STATIC_GATEWAY 8.8.8.8" \
+      connection.autoconnect yes >/dev/null
+    nmcli con up "$CON_NAME" >/dev/null 2>&1 || true
+  else
+    echo "    (no '$CON_NAME' profile found; leaving DHCP in place)"
+  fi
+fi
+
+echo "[8/8] Timezone + NTP..."
+# The station sits in Hong Kong. Both Asia/Hong_Kong and Asia/Singapore are
+# UTC+8 with no DST, so the clock reads the same either way — but the
+# label matters when reading logs.
+if command -v timedatectl >/dev/null 2>&1; then
+  timedatectl set-timezone Asia/Hong_Kong 2>/dev/null || true
+fi
+# One NTP pool means one outage takes the clock with it. These are
+# independent pools: one in Asia for a short path, one worldwide, and one
+# on a different network entirely.
+mkdir -p /etc/systemd/timesyncd.conf.d
+cat > /etc/systemd/timesyncd.conf.d/watchtower-ntp.conf <<'EOF'
+[Time]
+NTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org ntp.aliyun.com time.cloudflare.com
+FallbackNTP=pool.ntp.org time.cloudflare.com
+RootDistanceMaxSec=2
+PollIntervalMinSec=32
+PollIntervalMaxSec=1024
+EOF
+if systemctl list-unit-files 2>/dev/null | grep -q systemd-timesyncd; then
+  systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+  systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
+fi
+
 echo "[8/8] Done."
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 cat <<EOF

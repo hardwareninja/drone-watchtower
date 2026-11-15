@@ -1,8 +1,29 @@
 # Drone Watchtower — Lab Cheat Sheet
 
-Sensor box: hostname `drone` (aarch64) · Dashboard: `http://drone.local:8080`
-IP changes with every router — do not hard-code it. Discover: `bash scripts/find-watchtower.sh`
+Sensor box: hostname `drone` (aarch64, Kali guest) · Dashboard: `http://drone.local:8080`
+
+The sensor is a **VMware guest on the host's NAT network (vmnet8)**, with a
+fixed address of **192.168.252.134**. It does not change when the physical
+LAN changes — earlier it was bridged to Wi-Fi and picked up a new DHCP
+lease every time the router or Wi-Fi moved, which is why the address kept
+appearing to change.
+
+Use `drone.local` where you can; fall back to the fixed address:
+
+```bash
+bash scripts/find-watchtower.sh      # discovers it, prints the URL
+ssh drone@drone.local
+```
+
 Dev box: Mac (`~/Projects/drone-watchtower`)
+
+If the address ever does change, the cause is the guest's NetworkManager
+profile — it must be `manual`, not `dhcp`:
+
+```bash
+ssh drone@drone.local 'nmcli con show "Wired connection 1" | grep ipv4.method'
+# expect: ipv4.method: manual
+```
 
 ---
 
@@ -40,7 +61,12 @@ Dev box: Mac (`~/Projects/drone-watchtower`)
 | `watchtower-rid-beacon` | our DJI RID beacon decoder (ZMQ :4225) |
 | `watchtower-remoteid-ble` | Sniffle BLE receiver (ZMQ :4222) |
 | `watchtower-remoteid-refresh.timer` | 5-min receiver restart (USB-bounce self-heal) |
+| `adsb1090` | local 1090 MHz receiver (RTL-SDR) → :8091 |
+| `adsb1090-map` | map tile proxy → :8090 |
 | `hexstrike.service` | HexStrike AI tools (:8888) |
+
+The webapp also pulls **network ADS-B** on its own (no service needed) — see
+`adsb_network_feeds` below.
 
 Key paths: scanner `/opt/droneid-repo`, turbo `/opt/droneid-tools/remove_turbo_soft`, receiver `/opt/droneid-receiver`, webapp `/opt/watchtower-web`, captures `~/droneid-results/`.
 
@@ -55,11 +81,28 @@ Key paths: scanner `/opt/droneid-repo`, turbo `/opt/droneid-tools/remove_turbo_s
 ## Everyday commands
 
 ```bash
+# --- clock ---
+timedatectl                          # time zone + NTP sync status
+chronyc tracking 2>/dev/null || timedatectl show -p NTPSynchronized
+cat /etc/systemd/timesyncd.conf.d/watchtower-ntp.conf   # NTP sources
+sudo timedatectl set-timezone Asia/Hong_Kong             # station is in HK
+```
+
 # --- dashboard & scanning ---
 open http://drone.local:8080               # UI auto-reloads itself on deploys
 curl -X POST http://drone.local:8080/api/scan/start       # or use UI button
 curl -X POST http://drone.local:8080/api/scan/stop
-curl -X POST http://drone.local:8080/api/replay/start     # demo the archived flight
+curl -s http://drone.local:8080/api/status | python3 -m json.tool
+curl -s http://drone.local:8080/api/health  | python3 -m json.tool   # loop liveness
+
+# --- offline replay (no radio needed) ---
+# Replay a recorded IQ file through the live DroneID detector/decoder.
+# The path must be inside a capture directory (see README: Access control).
+# Add -H "X-Watchtower-Token: $TOKEN" if the station was set up to
+# require a token (off by default).
+curl -X POST "http://drone.local:8080/api/replay/start?path=/home/drone/replay-test.cs8&freq_hz=5756500000"
+curl -X POST "http://drone.local:8080/api/replay/start?path=/home/drone/replay-test.cs8&freq_hz=5756500000&root600=0.45&root147=0.35"
+curl -X POST http://drone.local:8080/api/replay/stop
 
 # --- capture (on Kali, HackRF) ---
 scripts/capture/hackrf_survey.sh 5800                    # band sweep (2400|5800|900|all)
@@ -99,7 +142,27 @@ ssh "drone@${HOST}" 'sudo bash /tmp/deploy-webapp/deploy-kali.sh'
 
 - **Station name + aircraft registry**: `webapp/backend/config.json` → deploy + restart `watchtower-web`. Position comes from the network, then from the u-blox.
 - **Scanner**: LNA 32 / VGA 24, 5.8G raster 5756.5/5776.5/5796.5/5816.5 MHz
+- **ZC gate**: `scanner_root600_threshold` (0.55) / `scanner_root147_threshold` (0.50). Higher = fewer false candidates reach the decoder. Tuned on `tests/data/zc_score_corpus.json`.
+- **Network ADS-B**: `adsb_network_feeds` (list of feed objects; `[]` disables) and `adsb_network_radius_nm` (100). Feeds are tagged `NET` in the UI.
 - **Drone behavior**: Avata 2 session hash changes per power cycle; RID positions zero until GPS fix (test outdoors)
+
+### `config.json` keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `station.name` | `Watchtower-01` | Label for the station marker |
+| `aircraft` | `{}` | Serial → model display name |
+| `retention_days` | `90` | How long history rows are kept |
+| `scanner_band` / `scanner_preset` | `both` / `baseline` | DroneID raster selection |
+| `scanner_freqs` | `[]` | Explicit frequency list, overrides the preset |
+| `scanner_dwell` | `0.8` | Seconds captured per frequency |
+| `scanner_root600_threshold` | `0.55` | root600 ZC correlation gate |
+| `scanner_root147_threshold` | `0.50` | root147 ZC correlation gate |
+| `adsb_url` | `http://127.0.0.1:8091/api/aircraft` | Local 1090 receiver |
+| `adsb_network_feeds` | adsb.lol + adsb.fi | Aggregator feeds; `[]` disables |
+| `adsb_network_radius_nm` | `100` | Search radius around the station |
+| `remoteid_zmq` | 4 endpoints | Remote ID receivers to subscribe to |
+| `hackrf_roles` | built-in | Serial → role label for the header |
 
 ## Build a standalone sensor on a new Raspberry Pi
 

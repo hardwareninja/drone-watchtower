@@ -6,6 +6,9 @@ is the research/offline entry point described in the enhancement doc.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import secrets
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +21,27 @@ from ml.signal_classifier import SignalClassifier, HAVE_SKLEARN
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = ROOT / "models" / "signal_classifier.pkl"
+# SHA-256 of the model this repo ships. joblib/pickle deserialisation
+# executes code by design, so a model file swapped in a pull request
+# would run on whoever loads it. The hash is checked before the load so
+# a modified file is refused rather than executed.
+#
+# Regenerate with: sha256sum models/signal_classifier.pkl
+MODEL_SHA256 = os.environ.get(
+    "WATCHTOWER_MODEL_SHA256",
+    "4d8485467df9e741bc53ccebc30e86bef385771008f132ce8920824ff99323c1",
+).strip()
+
+
+def model_is_trusted(path: Path) -> bool:
+    """True when *path* matches the expected hash, or no hash is pinned."""
+    if not MODEL_SHA256:
+        return True
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return secrets.compare_digest(digest, MODEL_SHA256.lower())
 
 
 class EnhancedDroneWatchtower:
@@ -30,6 +54,13 @@ class EnhancedDroneWatchtower:
             self.classifier = SignalClassifier()
             path = model_path or DEFAULT_MODEL
             if path.exists():
+                if not model_is_trusted(path):
+                    raise ValueError(
+                        f"{path} does not match the pinned model hash; refusing "
+                        "to unpickle an unverified model. Set "
+                        "WATCHTOWER_MODEL_SHA256 to the expected digest, or "
+                        "retrain and update MODEL_SHA256 in src/main.py."
+                    )
                 self.classifier.load_model(path)
 
     def process_iq(self, iq_data: np.ndarray, sample_rate: float = 20e6) -> dict:
