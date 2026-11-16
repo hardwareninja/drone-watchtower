@@ -59,10 +59,10 @@ def test_empty_serial_does_not_match_a_device_without_one(monkeypatch):
 
 
 def test_configured_serial_matches_its_device(monkeypatch):
-    monkeypatch.setattr(app, "HACKRF_DRONEID", "0000000000000000147865de331550df")
+    monkeypatch.setattr(app, "HACKRF_DRONEID", "0123456789abcdef0123456789abcdef")
     devices = [
         {"vendor": "0e0f", "product": "0002", "serial": ""},
-        {"vendor": "1d50", "product": "6089", "serial": "0000000000000000147865de331550df"},
+        {"vendor": "1d50", "product": "6089", "serial": "0123456789abcdef0123456789abcdef"},
     ]
     monkeypatch.setattr(app, "usb_devices", lambda: devices)
     pro_present = any(

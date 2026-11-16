@@ -9,21 +9,19 @@ sys.path.insert(0, str(ROOT / "webapp" / "backend"))
 
 import adsb_network
 
-# The station sits in Hong Kong; the test aircraft is a known distance away.
-STATION_LAT = 22.278317
-STATION_LON = 114.174689
+# Synthetic station. A real site is resolved at runtime, not stored here.
+STATION_LAT = 10.0
+STATION_LON = 20.0
 
 
-def test_haversine_matches_the_feed_distance():
-    """adsb.lol reported dst=47.506 nm for this track; our own haversine
-    from the station must agree closely."""
-    lat, lon = 22.267365, 113.317832
-    distance = adsb_network.haversine_nm(STATION_LAT, STATION_LON, lat, lon)
-    assert 47.0 < distance < 48.5
+def test_haversine_one_degree_of_latitude_is_sixty_nm():
+    """One degree of latitude is 60 nautical miles."""
+    distance = adsb_network.haversine_nm(0.0, 0.0, 1.0, 0.0)
+    assert 59.5 < distance < 60.5
 
 
 def test_haversine_is_zero_for_the_same_point():
-    assert adsb_network.haversine_nm(22.0, 114.0, 22.0, 114.0) == 0.0
+    assert adsb_network.haversine_nm(STATION_LAT, STATION_LON, STATION_LAT, STATION_LON) == 0.0
 
 
 def test_normalize_track_maps_feed_fields():
@@ -49,8 +47,10 @@ def test_normalize_track_maps_feed_fields():
     assert track["alt_ft"] == 13800
     assert track["gs_kt"] == 342.8
     assert track["lat"] == 22.275339
-    # Distance is computed from this station, not taken from the feed.
-    assert 46.0 < track["distance_nm"] < 48.0
+    # Distance is computed from the supplied station, not taken from the feed.
+    assert track["distance_nm"] == round(adsb_network.haversine_nm(
+        STATION_LAT, STATION_LON, row["lat"], row["lon"]), 2)
+    assert track["distance_nm"] > 0
     # Network tracks are always labelled as such.
     assert track["source"] == "net"
     assert track["feed"] == "adsb.lol"
@@ -101,10 +101,10 @@ def test_default_feeds_cover_both_key_shapes():
 
 
 def test_bounds_from_radius_are_north_south_west_east():
-    bounds = adsb_network.bounds_from_radius(22.278, 114.175, 60)
+    bounds = adsb_network.bounds_from_radius(STATION_LAT, STATION_LON, 60)
     north, south, west, east = [float(x) for x in bounds.split(",")]
-    assert north > 22.278 > south
-    assert east > 114.175 > west
+    assert north > STATION_LAT > south
+    assert east > STATION_LON > west
 
 
 def test_normalize_fr24_track_maps_fields_and_heli_category():

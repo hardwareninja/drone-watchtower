@@ -65,10 +65,10 @@ def test_network_tracks_carry_a_utc_last_seen():
     """The aggregator reports an age in seconds, not a timestamp. Turning
     it into a UTC stamp lets the dashboard show a local clock time."""
     row = {
-        "hex": "780F7F", "lat": 22.27, "lon": 113.33,
+        "hex": "780F7F", "lat": 10.1, "lon": 20.1,
         "alt_baro": 13800, "gs": 300.0, "seen": 12.5,
     }
-    track = adsb_network.normalize_track(row, "adsb.lol", 22.27, 114.17)
+    track = adsb_network.normalize_track(row, "adsb.lol", 10.0, 20.0)
     assert track["last_seen"].endswith("+00:00")
     stamp = datetime.datetime.fromisoformat(track["last_seen"])
     age = (datetime.datetime.now(datetime.timezone.utc) - stamp).total_seconds()
