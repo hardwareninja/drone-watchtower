@@ -758,7 +758,7 @@ def selftest() -> int:
     hb = pack_v2(0, struct.pack("<IBBBBB", 5, 2, 3, 0x80, 4, 3), sysid=7, seq=1)
     gps = pack_v2(
         33,
-        struct.pack("<IiiiihhhH", 1000, 222783000, 1141747000, 120000, 45000, 300, 400, 0, 9000),
+        struct.pack("<IiiiihhhH", 1000, 100000000, 200000000, 120000, 45000, 300, 400, 0, 9000),
         sysid=7, seq=2,
     )
     blob = b"\x00" * 40 + hb + b"\x11" * 8 + gps + b"\x00" * 20
@@ -770,7 +770,7 @@ def selftest() -> int:
     if parsed[0]["type_name"] != "quadrotor" or parsed[0]["sysid"] != 7:
         print("FAIL heartbeat", parsed[0])
         return 1
-    if abs(parsed[1]["lat"] - 22.2783) > 1e-4 or abs(parsed[1]["lon"] - 114.1747) > 1e-4:
+    if abs(parsed[1]["lat"] - 10.0) > 1e-4 or abs(parsed[1]["lon"] - 20.0) > 1e-4:
         print("FAIL gps", parsed[1])
         return 1
     sig = modulate_gfsk(blob)
