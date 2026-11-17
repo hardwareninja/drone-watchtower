@@ -10,7 +10,7 @@ Passive receiver for nearby drones and crewed aircraft. It listens, it does not 
 |---|---|
 | Raspberry Pi 5, 8 GB, or a 64-bit Linux machine with a powered USB hub | Runs the receivers and the dashboard. Pi 4 works, but DroneID correlation is slow. |
 | HackRF One | Hops between ELRS, Crossfire, SiK telemetry, and 5.8 GHz video carriers. |
-| ESP32-C5 flashed with `firmware/esp32c5-rid` | Remote ID. Wi-Fi beacons and Bluetooth, any USB port. |
+| ESP32-C5 flashed with `firmware/esp32c5-rid` | Remote ID. 2.4 GHz Wi-Fi beacons and Bluetooth, one band at a time, any USB port. |
 | One antenna per band you care about | 2.4 GHz, 915 MHz or 868 MHz, 5.8 GHz, 1090 MHz. A single "0–6 GHz" whip is a poor substitute. |
 
 ### Recommended
@@ -34,7 +34,7 @@ Receive only. Ranges are the ones the station tunes; a transmitter outside them 
 
 | Signal | Band | What is shown | What stays hidden |
 |---|---|---|---|
-| Remote ID (ASTM F3411 and DJI beacon) | 2.4 GHz Wi-Fi beacons and BLE advertisements | Identity, and position when the aircraft sends one | Nothing from these open beacons is decrypted; they are already in the clear |
+| Remote ID (ASTM F3411 and DJI beacon) | 2.4 GHz Wi-Fi beacons and BLE, one at a time. Optional 5 GHz beacon/NAN when `c5_wifi5` is true | Identity, and position when the aircraft sends one | Nothing from these open beacons is decrypted; they are already in the clear |
 | DJI DroneID O2/O3/O4 | 2.4 GHz and 5.8 GHz | Packet presence, INFP structure when the scanner decodes it | O4 CRYP session contents. That unwrap is not in this build |
 | ExpressLRS | 2.4 GHz FHSS | Link present, packet rate | Airframe, sticks, and telemetry. Frames are encrypted with the binding phrase |
 | TBS Crossfire | 868 MHz and 915 MHz FHSS | Link present when the hop pattern is there | Payload |
@@ -46,6 +46,8 @@ Receive only. Ranges are the ones the station tunes; a transmitter outside them 
 
 The HackRF One does not listen to all of those at once. While scanning, it cycles ELRS, Crossfire, SiK, then the 5.8 GHz video survey. The HackRF Pro, when attached, stays on DroneID.
 
+The ESP32-C5 is dual-band and not dual-concurrent. By default it alternates 2.4 GHz Wi-Fi beacons (and NAN action frames on the tuned channel) with BLE; it is never on both. Set `c5_wifi5` to `true` in `config.json` and restart `watchtower-c5-rid` to also hop 5 GHz Wi-Fi beacon/NAN, including channel 149 and DFS channels the country code allows the chip to tune. While it is on 5 GHz, 2.4 GHz Remote ID is missed, and the other way around. That hop is not HackRF 5.8 GHz DroneID or analog FPV. The dashboard dot is green only for the band the radio is on now.
+
 ## Limitations
 
 - No transmit, no jamming, no injection, no stick decode, and no recovery of an unknown binding phrase.
@@ -55,10 +57,12 @@ The HackRF One does not listen to all of those at once. While scanning, it cycle
 - O4 telemetry that is wrapped as CRYP is not turned into a position here.
 - One HackRF cannot watch 2.4, 915, and 5.8 at the same time. Dwell time is shared.
 - Remote ID positions are empty until the aircraft has its own GPS fix.
+- The C5 cannot receive 2.4 GHz and 5 GHz together. `c5_wifi5` defaults to false. Turning it on spends dwell on 5 GHz and drops 2.4 GHz packets during those dwells.
+- Broadcast fields (Remote ID serials and self-id text, DroneID markers, ADS-B callsigns, operator text) are untrusted. They are charset-constrained before they are stored, HTML-escaped in the dashboard, and encoded again for CSV, KML, and GPX.
 - The station dot uses this machine's network location until the u-blox has a fix. `config.json` does not store coordinates.
 - ADS-B needs a view of the sky. Indoor, the RTL-SDR can be healthy and still report no aircraft.
 - Analog picture requires the goggle receiver and the USB grabber. The HackRF only reports the video carrier.
-- The aircraft registry in `config.json` is a display name for a serial you already know. It does not filter other aircraft out.
+- The aircraft registry in `config.json` is a display name for a serial you already know. It does not filter other aircraft out. A newly seen serial is resolved against that local list once and then cached, including when the list has no name for it. There is no network lookup.
 - ADS-B tracks tagged `NET` came from a public aggregator, not from this station's receiver. They are listed so the panel is useful when no RTL-SDR is attached; they are never presented as local reception.
 - The `UAS?` badge is a heuristic over ADS-B fields (no callsign, no registration, no ICAO identity, low and slow, hovering). It marks a candidate worth looking at, not a confirmed drone.
 
@@ -193,7 +197,26 @@ reboots and network changes.
 
 History is SQLite at `/opt/watchtower-web/data/history.db`.
 
-Event timestamps are stored in UTC and displayed in the browser's own timezone, so a machine set to UTC+8 sees UTC+8. The Events tab date pickers work in local days as well, and the CSV export writes local time with its offset.
+Event timestamps are stored in UTC and displayed in the browser's own timezone, so a machine set to UTC+8 sees UTC+8. The Events tab date pickers work in local days as well, and the CSV export writes local time with its offset. The same filter accepts `fmt=kml` or `fmt=gpx`. Text cells are encoded for that format, and a CSV cell that would be a spreadsheet formula is prefixed so it stays text.
+
+## Companion runner
+
+`scripts/watchtower_enhancer.py` sits beside a running dashboard. It does not change the receivers, and it does not start unless you run it. CoT, ZeroMQ, and proximity output stay off when the matching flag is omitted.
+
+```bash
+python scripts/watchtower_enhancer.py --demo
+python scripts/watchtower_enhancer.py --bench
+python scripts/watchtower_enhancer.py --ws-url ws://127.0.0.1:8080/ws --token "$WATCHTOWER_TOKEN"
+python scripts/watchtower_enhancer.py --cot-host 239.2.3.1 --cot-port 6969
+python scripts/watchtower_enhancer.py --zmq-bind tcp://127.0.0.1:4224
+```
+
+* **Proximity.** Live DroneID and Remote ID positions are compared with 1090 and network ADS-B. `--horiz-warn-m` (default 3000) and `--vert-warn-m` (default 304.8, about 1000 ft) set the thresholds. Remote ID altitude and ADS-B `alt_ft` are not the same reference: one may be above the ground and the other barometric or geometric. The 3D figure is a warning aid, not certified TCAS.
+* **CoT.** UDP only, and only when `--cot-host` is set. Unicast or multicast. This is the only Cursor-on-Target emitter; the web app does not open another.
+* **ZeroMQ.** A PUB socket only when `--zmq-bind` is set. Use `tcp://127.0.0.1:4224`. The events include positions, so a bind on every interface (`tcp://*:4224`) is refused.
+* **Token.** `--token` or `WATCHTOWER_TOKEN` is sent as `X-Watchtower-Token`, `Authorization: Bearer`, and the `watchtower_token` cookie. It is not put in the WebSocket URL.
+
+`--bench` runs the offline ZC detector and channel estimator under `src/`. It does not open a radio.
 
 ## Research enhancements (`src/`)
 

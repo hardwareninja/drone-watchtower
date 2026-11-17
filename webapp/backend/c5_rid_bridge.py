@@ -9,10 +9,13 @@ tcp://127.0.0.1:4226, which the webapp already subscribes to.
 import fcntl
 import json
 import os
+import select
 import time
+from pathlib import Path
 
 import zmq
 
+import c5_rid
 import usb_locate
 
 C5_VENDOR = "303a"
@@ -38,42 +41,35 @@ def publish(obj: dict) -> None:
         print(f"raw rssi={obj.get('rssi')} {obj.get('raw')}", flush=True)
         return
     if obj.get("stats"):
-        print(f"stats ble={obj.get('ble')} wifi={obj.get('wifi')}", flush=True)
+        health = c5_rid.health_from_stats(obj)
+        pub.send_string(json.dumps({"c5_health": health}))
+        print(
+            f"stats band={health['band'] or '-'} wifi5_on={health['wifi5_on']} "
+            f"ble={health['ble']} wifi24={health['wifi24']} "
+            f"wifi5={health['wifi5']} nan={health['nan']}",
+            flush=True,
+        )
         return
-    serial = obj.get("serial") or ""
-    if not serial:
+    evt = c5_rid.event_from_firmware(obj, stamp())
+    if not evt:
         return
-    via = obj.get("via") or "wifi"
-    ch = int(obj.get("ch") or 0)
-    if via == "bt4":
-        freq = 2402.0
-        status = "bt4 legacy"
-    elif 1 <= ch <= 14:
-        freq = 2407 + ch * 5
-        status = "c5 beacon"
-    else:
-        freq = 5000 + ch * 5 if ch else 2437.0
-        status = "c5 beacon"
-    evt = {
-        "source": "remoteid",
-        "time": stamp(),
-        "session": serial,
-        "marker": "RemoteID",
-        "mac": obj.get("mac") or "",
-        "crc": True,
-        "freq": float(freq),
-        "rssi": obj.get("rssi") or 0,
-        "lat": float(obj.get("lat") or 0),
-        "lon": float(obj.get("lon") or 0),
-        "alt": 0.0,
-        "speed": 0,
-        "status": status,
-    }
-    if obj.get("op_lat") or obj.get("op_lon"):
-        evt["op_lat"] = float(obj.get("op_lat") or 0)
-        evt["op_lon"] = float(obj.get("op_lon") or 0)
     pub.send_string(json.dumps({"watchtower_event": evt}))
-    print(f"[{evt['time']}] {serial} ch{ch} rssi={evt['rssi']} ({evt['lat']:.6f},{evt['lon']:.6f})", flush=True)
+    ch = obj.get("ch") or 0
+    print(
+        f"[{evt['time']}] {evt['session']} {evt['status']} ch{ch} "
+        f"rssi={evt['rssi']} ({evt['lat']:.6f},{evt['lon']:.6f})",
+        flush=True,
+    )
+
+
+def load_wifi5() -> bool:
+    """config.json c5_wifi5. Absent, unreadable, or false means stay on 2.4."""
+    path = Path(__file__).with_name("config.json")
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return c5_rid.wifi5_from_config(raw)
 
 
 def find_port() -> str | None:
@@ -130,8 +126,17 @@ def main() -> None:
         try:
             print(f"C5 bridge: opening {path}", flush=True)
             fp = open_port(path)
+            fd = fp.fileno()
             buf = b""
+            last_cmd = 0.0
             while True:
+                now = time.time()
+                if now - last_cmd >= 5:
+                    os.write(fd, c5_rid.wifi5_command(load_wifi5()))
+                    last_cmd = now
+                ready, _, _ = select.select([fp], [], [], 1.0)
+                if not ready:
+                    continue
                 chunk = fp.read(256)
                 if not chunk:
                     break

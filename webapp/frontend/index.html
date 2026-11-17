@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Drone Watchtower — Live Detection</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="style.css?v=fr24a">
+  <link rel="stylesheet" href="style.css?v=c5bands1">
 </head>
 <body>
   <header id="topbar">
@@ -42,7 +42,7 @@
     </div>
     <div class="rf-side">
       <span class="scan-chip" id="scan-pro"><span class="scan-radio">Pro</span><span class="scan-proto" id="scan-pro-proto">offline</span></span>
-      <span class="scan-chip" id="scan-c5"><span class="scan-radio">C5</span><span class="scan-proto" id="scan-c5-proto">offline</span></span>
+      <span class="scan-chip" id="scan-c5"><span class="scan-radio">C5</span><span class="scan-proto" id="scan-c5-proto">offline</span><span class="c5-bands" id="c5-bands" aria-label="ESP32-C5 Remote ID, one band at a time"><span class="c5-dot offline" id="c5-dot-24">2.4</span><span class="c5-dot offline" id="c5-dot-5">5</span><span class="c5-dot offline" id="c5-dot-ble">BLE</span></span></span>
     </div>
   </div>
   <div id="ready-banner" class="hidden"></div>
@@ -139,6 +139,7 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=token1"></script>
+  <script src="escape.js?v=untrusted1"></script>
+  <script src="app.js?v=untrusted1"></script>
 </body>
 </html>

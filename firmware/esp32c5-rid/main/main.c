@@ -1,6 +1,11 @@
 /* ESP32-C5 Remote ID sniffer for Drone Watchtower.
- * Any aircraft that broadcasts ASTM F3411: Bluetooth legacy (UUID 0xFFFA),
- * Wi-Fi beacon message packs (OUI fa:0b:bc), or DJI's beacon TLVs (6a:5c:35). */
+ * Receive only: promiscuous Wi-Fi and BLE scan, no probe, no beacon tx.
+ * ASTM F3411 on Bluetooth legacy (UUID 0xFFFA), Wi-Fi beacon message packs
+ * (OUI fa:0b:bc), NAN action frames (OUI 50:6f:9a), and DJI beacon TLVs
+ * (6a:5c:35). The C5 is not dual-concurrent: it tunes 2.4 GHz or 5 GHz
+ * or pauses Wi-Fi for BLE, never more than one. 5 GHz beacon/NAN,
+ * including channel 149 and DFS, stays off until the host sends
+ * wifi5=1. That hop is not HackRF DroneID or analog FPV. */
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
@@ -48,7 +53,14 @@ static mac_slot_t mac_cache[MAC_SLOTS];
 
 static QueueHandle_t det_q;
 static volatile int ble_seen;
-static volatile int wifi_seen;
+static volatile int wifi24_seen;
+static volatile int wifi5_seen;
+static volatile int nan_seen;
+/* One radio. 5 GHz coverage stays off until the bridge sends wifi5=1.
+ * The hop never tunes 2.4 and 5 at the same time. */
+static volatile int wifi5_enabled;
+static volatile char radio_band = '2';
+static volatile uint8_t current_ch = 6;
 
 static int32_t be_i32(const uint8_t *p)
 {
@@ -154,6 +166,45 @@ static bool tlv_serial(const uint8_t *body, int len, det_t *out)
     return got;
 }
 
+static bool looks_like_pack(const uint8_t *pack, int len)
+{
+    if (len < 3 + 25) {
+        return false;
+    }
+    uint8_t size = pack[1];
+    uint8_t count = pack[2];
+    if (size < 25 || size > 40 || count == 0 || count > 9) {
+        return false;
+    }
+    return 3 + (int)count * size <= len;
+}
+
+/* NAN action frame: Wi-Fi Alliance OUI 50:6f:9a, then an OpenDroneID
+ * message pack in the service info (same size/count/messages layout as
+ * a beacon pack). Search is bounded to the bytes after the OUI. */
+static bool nan_pack(const uint8_t *frame, int len, det_t *out)
+{
+    static const uint8_t nan_oui[3] = {0x50, 0x6f, 0x9a};
+    for (int i = 24; i + 10 < len; i++) {
+        if (memcmp(frame + i, nan_oui, 3) != 0) {
+            continue;
+        }
+        int end = i + 220;
+        if (end > len) {
+            end = len;
+        }
+        for (int j = i + 3; j + 28 < end; j++) {
+            if (!looks_like_pack(frame + j, len - j)) {
+                continue;
+            }
+            if (parse_astm_pack(frame + j, len - j, out)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void sniff_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 {
     if (type != WIFI_PKT_MGMT || det_q == NULL) {
@@ -165,10 +216,18 @@ static void sniff_cb(void *buf, wifi_promiscuous_pkt_type_t type)
         return;
     }
     const uint8_t *p = pkt->payload;
-    if ((p[0] & 0xfc) != 0x80) { /* beacon */
+    uint8_t fc = p[0] & 0xfc;
+    bool beacon = fc == 0x80;
+    bool action = fc == 0xd0; /* public/vendor action, including NAN */
+    if (!beacon && !action) {
         return;
     }
-    wifi_seen++;
+    uint8_t channel = pkt->rx_ctrl.channel;
+    if (channel >= 1 && channel <= 14) {
+        wifi24_seen++;
+    } else if (channel >= 32) {
+        wifi5_seen++;
+    }
     for (int i = 0; i + 10 < len; i++) {
         int dji = memcmp(p + i, DJI_OUI, 3) == 0;
         int astm = memcmp(p + i, ASTM_OUI, 3) == 0;
@@ -182,12 +241,30 @@ static void sniff_cb(void *buf, wifi_promiscuous_pkt_type_t type)
             continue;
         }
         d.rssi = pkt->rx_ctrl.rssi;
-        d.channel = pkt->rx_ctrl.channel;
+        d.channel = channel;
         memcpy(d.mac, p + 10, 6); /* addr2, the transmitter */
-        memcpy(d.via, "wifi", 5);
+        if (action) {
+            nan_seen++;
+            memcpy(d.via, "nan", 4);
+        } else {
+            memcpy(d.via, "wifi", 5);
+        }
         xQueueSend(det_q, &d, 0);
         return;
     }
+    if (!action) {
+        return;
+    }
+    det_t d = {0};
+    if (!nan_pack(p, len, &d)) {
+        return;
+    }
+    nan_seen++;
+    d.rssi = pkt->rx_ctrl.rssi;
+    d.channel = channel;
+    memcpy(d.mac, p + 10, 6);
+    memcpy(d.via, "nan", 4);
+    xQueueSend(det_q, &d, 0);
 }
 
 static void printer_task(void *arg)
@@ -224,10 +301,23 @@ static void stats_task(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         int ble = ble_seen;
-        printf("{\"src\":\"c5\",\"stats\":true,\"ble\":%d,\"wifi\":%d}\n", ble - last_ble, wifi_seen);
+        const char *band = "24";
+        int dfs = 0;
+        if (radio_band == '5') {
+            band = "5";
+            dfs = (current_ch >= 52 && current_ch <= 144) ? 1 : 0;
+        } else if (radio_band == 'b') {
+            band = "ble";
+        }
+        printf("{\"src\":\"c5\",\"stats\":true,\"ble\":%d,\"wifi24\":%d,\"wifi5\":%d,\"nan\":%d,"
+               "\"band\":\"%s\",\"wifi5_on\":%d,\"dfs\":%d}\n",
+               ble - last_ble, wifi24_seen, wifi5_seen, nan_seen,
+               band, wifi5_enabled, dfs);
         fflush(stdout);
         last_ble = ble;
-        wifi_seen = 0;
+        wifi24_seen = 0;
+        wifi5_seen = 0;
+        nan_seen = 0;
     }
 }
 
@@ -415,29 +505,97 @@ static void ble_start(void)
     esp_ble_gap_set_scan_params(&ble_scan_params);
 }
 
+/* Default coverage: 2.4 GHz only. The bridge must send wifi5=1 before the
+ * radio leaves this list. BLE still takes the radio between dwells. */
+/* RID_HOP24_BEGIN */
+static const struct {
+    uint8_t ch;
+    uint16_t ms;
+} hop24[] = {
+    {6, 500}, {1, 180}, {6, 500}, {11, 180},
+};
+/* RID_HOP24_END */
+
+/* Optional 5 GHz beacon/NAN coverage, including channel 149 and DFS.
+ * Used one channel at a time, and only while wifi5_enabled is set.
+ * RID_HOP5_BEGIN */
+static const struct {
+    uint8_t ch;
+    uint16_t ms;
+} hop5[] = {
+    {36, 140}, {40, 140}, {44, 140}, {48, 140},
+    {149, 180}, {153, 140}, {157, 140}, {161, 140}, {165, 140},
+    {52, 120}, {56, 120}, {60, 120}, {64, 120},
+    {100, 120}, {104, 120}, {108, 120}, {112, 120},
+    {116, 120}, {120, 120}, {124, 120}, {128, 120},
+    {132, 120}, {136, 120}, {140, 120}, {144, 120},
+};
+/* RID_HOP5_END */
+
+static void tune(uint8_t ch, uint16_t ms, char band)
+{
+    esp_err_t err = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "channel %u failed: %s", ch, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+    current_ch = ch;
+    radio_band = band;
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
 static void hop_task(void *arg)
 {
-    static const struct {
-        uint8_t ch;
-        uint16_t ms;
-    } hop[] = {
-        {6, 500}, {1, 180}, {6, 500}, {11, 180},
-        {6, 500}, {36, 180}, {40, 180}, {44, 180}, {48, 180},
-        {6, 500}, {149, 180}, {153, 180}, {157, 180}, {161, 180}, {165, 180},
-    };
-    int n = sizeof(hop) / sizeof(hop[0]);
-    int i = 0;
+    int n24 = sizeof(hop24) / sizeof(hop24[0]);
+    int n5 = sizeof(hop5) / sizeof(hop5[0]);
+    int i24 = 0;
+    int i5 = 0;
+    int step = 0;
     while (1) {
-        /* BLE legacy adverts need the radio. Promiscuous Wi-Fi otherwise holds it. */
+        /* BLE cannot run while promiscuous Wi-Fi holds the radio. */
+        radio_band = 'b';
         esp_wifi_set_promiscuous(false);
-        vTaskDelay(pdMS_TO_TICKS(700));
+        vTaskDelay(pdMS_TO_TICKS(wifi5_enabled ? 250 : 700));
         esp_wifi_set_promiscuous(true);
-        esp_err_t err = esp_wifi_set_channel(hop[i].ch, WIFI_SECOND_CHAN_NONE);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "channel %u failed: %s", hop[i].ch, esp_err_to_name(err));
+        /* Odd steps visit 5 GHz only after wifi5=1. Otherwise every step
+         * is 2.4 GHz. Never both. */
+        if (wifi5_enabled && (step % 2 == 1)) {
+            tune(hop5[i5].ch, hop5[i5].ms, '5');
+            i5 = (i5 + 1) % n5;
+        } else {
+            tune(hop24[i24].ch, hop24[i24].ms, '2');
+            i24 = (i24 + 1) % n24;
         }
-        vTaskDelay(pdMS_TO_TICKS(hop[i].ms));
-        i = (i + 1) % n;
+        step++;
+    }
+}
+
+static void cmd_task(void *arg)
+{
+    char line[16];
+    int n = 0;
+    while (1) {
+        int c = getchar();
+        if (c < 0) {
+            vTaskDelay(pdMS_TO_TICKS(40));
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            line[n] = 0;
+            if (strcmp(line, "wifi5=1") == 0) {
+                wifi5_enabled = 1;
+            } else if (strcmp(line, "wifi5=0") == 0) {
+                wifi5_enabled = 0;
+            }
+            n = 0;
+            continue;
+        }
+        if (n + 1 < (int)sizeof(line)) {
+            line[n++] = (char)c;
+        } else {
+            n = 0;
+        }
     }
 }
 
@@ -453,6 +611,8 @@ void app_main(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    /* Country before start so the 5 GHz list, including DFS, is loaded
+     * for receive. The hop never transmits on those channels. */
     ESP_ERROR_CHECK(esp_wifi_set_country_code("HK", false));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO));
@@ -466,6 +626,7 @@ void app_main(void)
     ble_start();
     xTaskCreate(printer_task, "print", 4096, NULL, 5, NULL);
     xTaskCreate(stats_task, "stats", 3072, NULL, 3, NULL);
+    xTaskCreate(cmd_task, "cmd", 3072, NULL, 3, NULL);
     xTaskCreate(hop_task, "hop", 3072, NULL, 4, NULL);
     printf("{\"src\":\"c5\",\"ready\":true}\n");
     fflush(stdout);

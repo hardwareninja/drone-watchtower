@@ -29,7 +29,10 @@ from pathlib import Path
 import usb_locate
 import adsb_classify
 import adsb_network
+import aircraft_registry
+import c5_rid
 import textsan
+import track_export
 import zc_gate
 
 try:
@@ -164,22 +167,40 @@ def api_token() -> str:
     return token
 
 
+def presented_token(headers, cookies=None, query=None) -> str:
+    """Token from a header, a bearer value, or the session cookie.
+
+    A query-string token is accepted only as a last resort. Callers that
+    can set headers must not put the token in the URL: the access log
+    records the URL.
+    """
+    header = ""
+    auth = ""
+    if headers is not None:
+        header = headers.get("x-watchtower-token") or ""
+        auth = headers.get("authorization") or ""
+    if header:
+        return header
+    if auth.lower().startswith("bearer "):
+        bearer = auth[7:].strip()
+        if bearer:
+            return bearer
+    if cookies is not None:
+        cookie = cookies.get(TOKEN_COOKIE) or ""
+        if cookie:
+            return cookie
+    if query is not None:
+        return query.get("token") or ""
+    return ""
+
+
 def token_ok(request) -> bool:
     """True when the request carries the configured token."""
     expected = api_token()
     if not expected:
         return True
-    header = request.headers.get("x-watchtower-token") or ""
-    if header and secrets.compare_digest(header, expected):
-        return True
-    cookie = request.cookies.get(TOKEN_COOKIE) or ""
-    if cookie and secrets.compare_digest(cookie, expected):
-        return True
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        if secrets.compare_digest(auth[7:].strip(), expected):
-            return True
-    return False
+    supplied = presented_token(request.headers, request.cookies, request.query_params)
+    return bool(supplied) and secrets.compare_digest(supplied, expected)
 
 
 @app.middleware("http")
@@ -308,24 +329,27 @@ def parse_line(line: str) -> dict | None:
                 "crc": True,
                 "sha": sha,
                 "mode": state["mode"],
-                "pclass": classification,
+                "pclass": textsan.safe_label(classification),
             }
+        marker = textsan.safe_label(p[2:6].decode("ascii", "replace")) or "DJI"
         evt = {
             "time": j["event_time_utc"],
             "freq": j["frequency_mhz"],
-            "marker": p[2:6].decode("ascii", "replace"),
+            "marker": marker,
             "session": p[6:10].hex(),
             "rssi": j.get("dwell_average_power_dbfs"),
             "crc": crc_ok,
             "sha": (j.get("payload_sha256") or "")[:12],
             "mode": state["mode"],
-            "pclass": classification,
+            "pclass": textsan.safe_label(classification),
         }
         drone = j.get("drone_id")
         if isinstance(drone, dict):
             # classic O2/O3 carries plaintext telemetry: use the real serial
-            # as the session so it can line up with a Remote ID later
-            serial = str(drone.get("serial") or "").strip()
+            # as the session so it can line up with a Remote ID later.
+            # The serial is chosen by the aircraft, so it is constrained
+            # before it becomes the session id.
+            serial = textsan.safe_label(drone.get("serial"))
             if classification == "classic_o2_plaintext" and serial:
                 evt["session"] = serial
                 evt["marker"] = "O2PT"
@@ -404,7 +428,8 @@ EXTRA_COLS = (("op_lat", "REAL"), ("op_lon", "REAL"),
 
 
 def insert_event(evt: dict) -> None:
-    row = {k: evt.get(k) for k in EVENT_COLS}
+    clean = textsan.sanitize_text_fields(evt)
+    row = {k: clean.get(k) for k in EVENT_COLS}
     # a position-less event still needs to know where the station was, so the
     # history map can place it correctly after the station moves on GPS
     if not row.get("lat") and not row.get("lon"):
@@ -482,14 +507,18 @@ def _rid_dup(evt: dict) -> bool:
 
 
 def publish_event(evt: dict) -> None:
+    if not isinstance(evt, dict):
+        return
+    evt = textsan.sanitize_text_fields(evt)
     if evt.get("source") == "remoteid" and _rid_dup(evt):
         return
     with lock:
         state["events"] += 1
-    # Attach known-aircraft model for both RID and O2 plaintext sessions
-    # (O2 classic uses the real serial as session — same key as Remote ID).
+    # One lookup per new serial against the local aircraft list. O2 classic
+    # uses the real serial as session, the same key as Remote ID.
     if evt.get("session"):
-        model = CONFIG.get("aircraft", {}).get(evt.get("session"))
+        model = aircraft_registry.registry.resolve(
+            evt.get("session"), CONFIG.get("aircraft") or {})
         if model:
             evt["model"] = model
     insert_event(evt)
@@ -619,9 +648,21 @@ def readiness() -> dict:
     return {"ok": not problems, "problems": problems}
 
 
+def c5_band_report(dongles: list[dict] | None = None) -> dict:
+    """2.4 / 5 / BLE dots for the ESP32-C5. HackRF 5.8 is not part of this."""
+    if dongles is None:
+        dongles = dongle_status()
+    attached = any(d.get("id") == "c5" and d.get("attached") for d in dongles)
+    return c5_rid.band_status(
+        attached, state.get("c5_health"), time.time(),
+        wifi5_configured=bool(CONFIG.get("c5_wifi5")),
+    )
+
+
 def status_dict() -> dict:
     started = state.get("started")
     ready = readiness()
+    dongles = dongle_status()
     return {
         "running": state["running"],
         "armed": state.get("armed", True),
@@ -638,7 +679,7 @@ def status_dict() -> dict:
         ),
         "station": station_dict(),
         "gps": public_gps(),
-        "dongles": dongle_status(),
+        "dongles": dongles,
         "internet": state.get("internet"),
         "adsb_error": state.get("adsb_error"),
         "adsb_network_error": state.get("adsb_network_error"),
@@ -655,6 +696,7 @@ def status_dict() -> dict:
         "ready": ready["ok"],
         "problems": ready["problems"],
         "demods": {"elrs": DEMOD is not None, "mavlink": MAV is not None},
+        "c5_bands": c5_band_report(dongles),
     }
 
 
@@ -1252,15 +1294,23 @@ def history_sessions(limit: int = 100) -> list:
         return (datetime.datetime.fromisoformat(r["first"]),
                 datetime.datetime.fromisoformat(r["last"]))
 
-    # registry lookup for RemoteID sessions
-    aircraft = CONFIG.get("aircraft", {})
+    def _tokens(value: str) -> str:
+        parts = [textsan.safe_label(part) for part in str(value or "").split(",")]
+        return ",".join(part for part in parts if part)
+
+    # One local-registry lookup per serial. Repeats of a serial already
+    # seen hit the cache instead of scanning the list again.
+    aircraft = CONFIG.get("aircraft") or {}
     rid_rows = []
     for r in result:
+        r["session"] = textsan.safe_label(r.get("session"))
+        r["sources"] = _tokens(r.get("sources") or "")
+        r["markers"] = _tokens(r.get("markers") or "")
+        model = aircraft_registry.registry.resolve(r.get("session"), aircraft)
+        if model:
+            r["model"] = model
         if "remoteid" in (r.get("sources") or ""):
             rid_rows.append(r)
-            m = aircraft.get(r["session"])
-            if m:
-                r["model"] = m
     # propagate model to DroneID sessions active at the same time
     for r in result:
         if r.get("model") or r in rid_rows:
@@ -1366,44 +1416,80 @@ def history_events(session: str = "", limit: int = 500, offset: int = 0,
     args += [limit, offset]
     with db_conn() as c:
         rows = c.execute(q, args).fetchall()
-    return [dict(r) for r in rows]
+    return [textsan.sanitize_text_fields(dict(r)) for r in rows]
+
+
+def _history_fetched(session: str, source: str, frm: str, to: str) -> list[dict]:
+    q, args = _history_where(session, source, frm, to)
+    q += " ORDER BY time DESC"
+    local_tz = local_timezone()
+    out = []
+    with db_conn() as c:
+        for r in c.execute(q, args):
+            row = track_export.public_row(dict(r))
+            row["time"] = to_local_iso(row.get("time"), local_tz)
+            out.append(row)
+    return out
 
 
 @app.get("/api/history/export")
 def history_export(session: str = "", source: str = "", frm: str = "",
-                   to: str = "") -> StreamingResponse:
-    """Stream the filtered event history as CSV, row by row.
+                   to: str = "", fmt: str = "csv"):
+    """Export the filtered event history.
 
-    The ``time`` column is written in the station's local time so the file
-    matches what the dashboard shows. Everything else is unchanged.
+    ``fmt`` is ``csv`` (default), ``kml``, or ``gpx``. Text fields are
+    constrained and then encoded for that format. The CSV ``time`` column
+    is the station's local time. A cell that would be a spreadsheet
+    formula is prefixed so it stays text.
     """
+    kind = (fmt or "csv").strip().lower()
+    if kind in ("kml", "gpx"):
+        rows = _history_fetched(session, source, frm, to)
+        if kind == "kml":
+            body = track_export.to_kml(rows)
+            media = "application/vnd.google-earth.kml+xml"
+            filename = "watchtower-events.kml"
+        else:
+            body = track_export.to_gpx(rows)
+            media = "application/gpx+xml"
+            filename = "watchtower-events.gpx"
+        return Response(
+            content=body,
+            media_type=media,
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
     q, args = _history_where(session, source, frm, to)
     q += " ORDER BY time DESC"
     local_tz = local_timezone()
 
     def rows():
-        buf = io.StringIO()
-        w = csv.writer(buf)
         header = list(EVENT_COLS)
         if header and header[0] == "time":
             header[0] = "time_local"
-        w.writerow(header)
-        yield buf.getvalue()
-        buf.seek(0)
-        buf.truncate(0)
+        yield track_export.csv_document(header, [])
         with db_conn() as c:
             cursor = c.execute(q, args)
             while True:
                 batch = cursor.fetchmany(500)
                 if not batch:
                     break
+                prepared = []
                 for r in batch:
-                    values = [r[k] for k in EVENT_COLS]
+                    values = []
+                    for key in EVENT_COLS:
+                        value = r[key]
+                        if key in track_export.TEXT_FIELDS and isinstance(value, str):
+                            value = textsan.safe_label(value)
+                        values.append(value)
                     values[0] = to_local_iso(values[0], local_tz)
-                    w.writerow(values)
+                    prepared.append(values)
+                # Header was already written. Append data rows only.
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                for values in prepared:
+                    writer.writerow([textsan.csv_cell(value) for value in values])
                 yield buf.getvalue()
-                buf.seek(0)
-                buf.truncate(0)
 
     return StreamingResponse(
         rows(),
@@ -1415,19 +1501,17 @@ def history_export(session: str = "", source: str = "", frm: str = "",
 @app.websocket("/ws")
 async def ws(ws: WebSocket) -> None:
     global loop
-    # The browser cannot set headers on a WebSocket, so the token has to
-    # arrive as a cookie or a query parameter. A wrong token closes the
-    # socket instead of subscribing it to the detection feed.
+    # The browser sends the cookie. A Python client can also send
+    # X-Watchtower-Token or Authorization: Bearer. The token does not
+    # belong in the URL: that line is written to the access log.
     #
     # The socket is accepted first and then closed with 4401: closing
     # before the handshake completes is delivered to the browser as a
     # plain HTTP 403 rejection, and the client cannot tell that apart
     # from a network fault — so it would reconnect in a loop.
-    cookie = ws.cookies.get(TOKEN_COOKIE) or ""
-    query = ws.query_params.get("token") or ""
     expected = api_token()
     if expected:
-        supplied = cookie or query
+        supplied = presented_token(ws.headers, ws.cookies, ws.query_params)
         if not supplied or not secrets.compare_digest(supplied, expected):
             await ws.accept()
             await ws.close(code=4401)
@@ -1451,7 +1535,7 @@ def remoteid_event(drone: list) -> dict | None:
     dashboard, so they are constrained to a markup-free charset here,
     at the trust boundary.
     """
-    mac, serial, pos, sysinfo, selfid = None, None, None, None, None
+    mac, serial, pos, sysinfo, selfid, operator = None, None, None, None, None, None
     for item in drone:
         if isinstance(item, dict):
             if "MAC" in item:
@@ -1479,6 +1563,10 @@ def remoteid_event(drone: list) -> dict | None:
                     sysinfo = {"op_lat": s["latitude"] / 1e7, "op_lon": s["longitude"] / 1e7}
             if "Self ID" in item:
                 selfid = textsan.safe_label(item["Self ID"].get("text"))
+            if "Operator ID" in item and isinstance(item["Operator ID"], dict):
+                block = item["Operator ID"]
+                operator = textsan.safe_label(
+                    block.get("id") or block.get("operator_id") or block.get("text"))
     ident = serial or mac
     if not ident:
         return None
@@ -1489,6 +1577,7 @@ def remoteid_event(drone: list) -> dict | None:
         "marker": "RemoteID",
         "mac": mac,
         "selfid": selfid,
+        "operator": operator or "",
         "crc": True,
         "freq": 2437.0,
         "rssi": 0,
@@ -1525,7 +1614,7 @@ def adsb_snapshot() -> list[dict]:
             "seen": a.get("seen"),
             "messages": a.get("messages"),
             "distance_nm": a.get("distance_nm"),
-            "country": a.get("country") or "",
+            "country": textsan.safe_label(a.get("country") or ""),
             "last_seen": a.get("lastSeen") or "",
             # This is what the box itself heard over the air.
             "source": "1090",
@@ -1672,7 +1761,8 @@ def adsb_loop() -> None:
     """Push the merged ADS-B picture to the dashboard."""
     while True:
         beat("adsb")
-        broadcast({"type": "adsb", "aircraft": adsb_snapshot_all()})
+        tracks = adsb_snapshot_all()
+        broadcast({"type": "adsb", "aircraft": tracks})
         time.sleep(ADSB_POLL_INTERVAL_S)
 
 
@@ -2296,6 +2386,9 @@ def remoteid_loop(endpoint: str) -> None:
             continue
         try:
             data = json.loads(msg)
+            if isinstance(data, dict) and isinstance(data.get("c5_health"), dict):
+                state["c5_health"] = data["c5_health"]
+                continue
             if isinstance(data, dict) and "watchtower_event" in data:
                 publish_event(data["watchtower_event"])
                 continue

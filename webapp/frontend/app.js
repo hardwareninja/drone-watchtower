@@ -4,37 +4,8 @@
  */
 const $ = (id) => document.getElementById(id);
 
-/* Escape a value for interpolation into an innerHTML template.
- *
- * Most strings on this page are chosen by whoever is on the air — an
- * ADS-B callsign, a MAVLink STATUSTEXT, a Remote ID serial — and they
- * are rendered through innerHTML. The decoders constrain their charset
- * too (see textsan.py), but escaping at the sink is the second layer
- * that keeps one missed field from becoming script execution in the
- * operator's browser.
- */
-function esc(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/* Render a key/value panel.
- *
- * Each entry is [key, value] or [key, value, "mono"]. The value is always
- * escaped; "mono" wraps the escaped text in <code>. Values are never
- * raw HTML, so an attacker-supplied string cannot inject markup here.
- */
-function kvHtml(kv) {
-  return kv.map(([k, v, style]) => {
-    const val = style === "mono" ? `<code>${esc(v)}</code>` : esc(v);
-    return `<div class="kv"><span>${esc(k)}</span><span>${val}</span></div>`;
-  }).join("");
-}
+/* esc() and kvHtml() live in escape.js. Broadcast strings are escaped
+ * there before they enter HTML or an attribute. */
 
 let map, stationMarker, activityRing, dotLayer;
 let station = null;
@@ -96,6 +67,11 @@ function fmtDate(iso) {
 
 // The zone the viewer's browser is in, e.g. "GMT+8". Shown next to times
 // so nobody has to guess which zone a reading is in.
+function fmtFixed(value, digits) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : "—";
+}
+
 function localZoneLabel() {
   try {
     const off = -new Date().getTimezoneOffset() / 60;
@@ -397,6 +373,7 @@ function setScanBar(st) {
     c5.classList.toggle("idle", !c5Att);
     c5Proto.textContent = !c5Att ? "offline" : c5Live ? "RemoteID" : "waiting";
   }
+  setC5Bands(st.c5_bands);
 
   const hopLabel = $("dongle-one") && $("dongle-one").querySelector(".dongle-hop-label");
   if (hopLabel) hopLabel.textContent = hop || "One";
@@ -405,6 +382,25 @@ function setScanBar(st) {
     dongleOne.title = hop
       ? `HackRF One · scanning ${hop}`
       : "HackRF One · ELRS / TBS / MAVLink / VTX hop";
+  }
+}
+
+function setC5Bands(bands) {
+  const map = [
+    ["c5-dot-24", "wifi24"],
+    ["c5-dot-5", "wifi5"],
+    ["c5-dot-ble", "ble"],
+  ];
+  for (const [id, key] of map) {
+    const el = $(id);
+    if (!el) continue;
+    const state = bands && bands[key];
+    const shown = state === "ok" || state === "down" || state === "away" || state === "off"
+      ? state : "offline";
+    el.classList.remove("ok", "down", "offline");
+    el.classList.add(shown);
+    const detail = bands && bands.detail && bands.detail[key];
+    if (detail) el.title = detail;
   }
 }
 
@@ -500,6 +496,7 @@ function onRemoteId(evt) {
   s.lastTime = evt.time;
   s.model = evt.model || s.model;
   s.selfid = evt.selfid;
+  s.operator = evt.operator || s.operator;
   s.opLat = evt.op_lat; s.opLon = evt.op_lon;
   if (hasFix(evt.lat, evt.lon)) {
     s.pos = { lat: evt.lat, lon: evt.lon, alt: evt.alt, speed: evt.speed, status: evt.status };
@@ -641,7 +638,7 @@ function renderBanner() {
     if (helis.length) {
       const names = helis.map((a) => a.flight || a.type || a.hex).slice(0, 3).join(", ");
       heliBanner.textContent = helis.length === 1
-        ? `Helicopter alert — ${esc(names)}`
+        ? `Helicopter alert — ${names}`
         : `Helicopter alert — ${helis.length} tracks (${names})`;
       heliBanner.classList.remove("hidden");
     } else {
@@ -970,9 +967,9 @@ function adsbHoverHtml(a) {
       a.track != null ? `${Math.round(a.track)}°` : null,
       a.distance_nm != null ? `${Number(a.distance_nm).toFixed(1)} nm` : null,
     ].filter(Boolean).join(" · "),
-    a.type && a.type !== "Unknown" ? a.type : null,
+    a.type && a.type !== "Unknown" ? esc(a.type) : null,
     a.squawk ? `Squawk ${esc(a.squawk)}` : null,
-    a.helicopter && a.helicopter_flags ? a.helicopter_flags.join(" · ") : null,
+    a.helicopter && a.helicopter_flags ? esc(a.helicopter_flags.join(" · ")) : null,
     a.uas_candidate && a.uas_flags ? `UAS? ${esc(a.uas_flags.join(" · "))}` : null,
   ].filter(Boolean);
   return `<div class="adsb-tip">${lines.join("<br>")}</div>`;
@@ -986,7 +983,7 @@ function adsbBadges(a) {
     html += '<span class="tag tag-heli" title="Helicopter / rotorcraft">HELI</span> ';
   }
   if (a.source === "net") {
-    html += `<span class="tag tag-net" title="Heard by the ${a.feed || "network"} aggregator, not by this station">NET</span> `;
+    html += `<span class="tag tag-net" title="Heard by the ${esc(a.feed || "network")} aggregator, not by this station">NET</span> `;
   } else {
     html += '<span class="tag tag-adsb">1090</span> ';
   }
@@ -1036,7 +1033,7 @@ function renderAdsb() {
     L.marker([a.lat, a.lon], {
       icon: planeIcon(a.track, selected, a.source === "net", !!a.helicopter),
       zIndexOffset: selected ? 500 : (a.helicopter ? 400 : 0),
-      title: a.helicopter ? `HELI ${esc(a.flight || a.hex)}` : esc(a.flight || a.hex),
+      title: a.helicopter ? `HELI ${a.flight || a.hex || ""}` : `${a.flight || a.hex || ""}`,
     })
       .addTo(adsbLayer)
       .bindTooltip(adsbHoverHtml(a), {
@@ -1108,7 +1105,7 @@ function placeStation() {
   if (!ll) return;
   const where = station.source === "gps" ? "GPS fix"
     : station.source === "network" ? "network location" : "approximate position";
-  const text = `<b>${station.name}</b><br>${where}<br>${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`;
+  const text = `<b>${esc(station.name)}</b><br>${esc(where)}<br>${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`;
   if (!stationMarker) {
     stationMarker = L.marker(ll, {
       icon: L.divIcon({
@@ -1174,6 +1171,7 @@ function renderMap() {
     s.droneDot.setLatLng([s.pos.lat, s.pos.lon]);
     s.droneDot.bindPopup(`<b>${esc(ident)}</b><br>${Number(s.pos.lat).toFixed(5)}, ${Number(s.pos.lon).toFixed(5)}` +
       `<br>${s.pos.alt != null ? Number(s.pos.alt).toFixed(1) + " m" : ""}` +
+      (s.operator ? `<br>operator ${esc(s.operator)}` : "") +
       (s.selfid ? `<br>${esc(s.selfid)}` : ""));
     if (hasFix(s.opLat, s.opLon)) {
       if (!s.opDot) {
@@ -1240,11 +1238,12 @@ function renderInfo() {
     kv.push(["Position", rid.pos ? `${Number(rid.pos.lat).toFixed(6)}, ${Number(rid.pos.lon).toFixed(6)}` : "—"]);
     if (rid.pos) kv.push(["Altitude / status", `${Number(rid.pos.alt).toFixed(1)} m · ${rid.pos.status || ""}`]);
     kv.push(["Operator position", rid.opLat ? `${Number(rid.opLat).toFixed(6)}, ${Number(rid.opLon).toFixed(6)}` : "—"]);
+    if (rid.operator) kv.push(["Operator", rid.operator]);
+    if (rid.selfid) kv.push(["Self ID", rid.selfid]);
   }
   const lastIso = rid && (!dj || tsec(rid.lastTime) > tsec(dj.lastTime)) ? rid.lastTime : dj.lastTime;
   kv.push(["Last seen", fmtTime(lastIso) + " " + localZoneLabel()]);
-  const rows = kv.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
-  $("info-kv").innerHTML = rows;
+  $("info-kv").innerHTML = kvHtml(kv);
   // merged packet table
   const all = [];
   if (rid) for (const p of rid.packets) all.push({ ...p, proto: "RID" });
@@ -1254,8 +1253,8 @@ function renderInfo() {
   body.innerHTML = "";
   for (const p of all.slice(0, 20)) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(fmtTime(p.time))}</td><td>${esc(p.freq.toFixed(1))}</td>` +
-      `<td class="${p.marker === "CRYP" ? "cryp" : ""}">${p.marker}</td><td>${p.proto === "RID" ? "—" : p.rssi.toFixed(1)}</td>`;
+    tr.innerHTML = `<td>${esc(fmtTime(p.time))}</td><td>${esc(fmtFixed(p.freq, 1))}</td>` +
+      `<td class="${p.marker === "CRYP" ? "cryp" : ""}">${esc(p.marker)}</td><td>${p.proto === "RID" ? "—" : esc(fmtFixed(p.rssi, 1))}</td>`;
     body.appendChild(tr);
   }
 }
@@ -1396,16 +1395,19 @@ function renderHistoryTable(evs, title) {
   }
   const rows = evs.map((e) => {
     const src = SRC_LABEL[e.source] || e.source || "—";
-    const level = e.rssi != null && e.source !== "remoteid" ? e.rssi.toFixed(1) + " dB" : "—";
-    const pos = (e.lat || e.lon) ? `${e.lat.toFixed(5)}, ${e.lon.toFixed(5)}` : "—";
+    const level = e.rssi != null && e.source !== "remoteid" ? fmtFixed(e.rssi, 1) + " dB" : "—";
+    const lat = Number(e.lat);
+    const lon = Number(e.lon);
+    const pos = Number.isFinite(lat) && Number.isFinite(lon) && !(lat === 0 && lon === 0)
+      ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "—";
     const crc = e.crc ? "" : " · bad CRC";
-    return `<tr><td>${fmtDateTime(e.time)}</td>` +
+    return `<tr><td>${esc(fmtDateTime(e.time))}</td>` +
       `<td><code>${esc(e.session)}</code></td><td>${esc(src)}</td>` +
-      `<td class="${e.marker === "CRYP" ? "cryp" : ""}">${e.marker || "—"}${crc}</td>` +
-      `<td>${e.freq != null ? e.freq.toFixed(1) : "—"}</td><td>${level}</td><td>${pos}</td></tr>`;
+      `<td class="${e.marker === "CRYP" ? "cryp" : ""}">${esc(e.marker || "—")}${esc(crc)}</td>` +
+      `<td>${esc(e.freq != null ? fmtFixed(e.freq, 1) : "—")}</td><td>${esc(level)}</td><td>${esc(pos)}</td></tr>`;
   }).join("");
-  el.innerHTML = `<div class="ht-title">${title} · ${evs.length} rows</div>` +
-    `<table><thead><tr><th>Time (${localZoneLabel()})</th><th>Identifier</th><th>Protocol</th>` +
+  el.innerHTML = `<div class="ht-title">${esc(title)} · ${evs.length} rows</div>` +
+    `<table><thead><tr><th>Time (${esc(localZoneLabel())})</th><th>Identifier</th><th>Protocol</th>` +
     `<th>Marker</th><th>MHz</th><th>Level</th><th>Position</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -1420,8 +1422,8 @@ async function showHistoryDetail(h) {
   const evs = await (await apiFetch(`/api/history/events?${p}`)).json();
   histEvents = evs;
   const title = src
-    ? `Session ${esc(h.session)} · ${SRC_LABEL[src] || src}`
-    : `Session ${esc(h.session)}`;
+    ? `Session ${h.session} · ${SRC_LABEL[src] || src}`
+    : `Session ${h.session}`;
   renderHistoryTable(evs, title);
   $("hist-more").disabled = true;
   if (histMapOn && map) drawHistoryMap(evs);
@@ -1445,9 +1447,9 @@ async function showHistoryDetail(h) {
   body.innerHTML = "";
   for (const e of evs.slice(0, 20)) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(fmtDateTime(e.time))}</td><td>${esc(e.freq ? e.freq.toFixed(1) : "—")}</td>` +
-      `<td class="${e.marker === "CRYP" ? "cryp" : ""}">${e.marker || "?"}</td>` +
-      `<td>${e.rssi != null && e.source !== "remoteid" ? e.rssi.toFixed(1) : "—"}</td>`;
+    tr.innerHTML = `<td>${esc(fmtDateTime(e.time))}</td><td>${esc(e.freq ? fmtFixed(e.freq, 1) : "—")}</td>` +
+      `<td class="${e.marker === "CRYP" ? "cryp" : ""}">${esc(e.marker || "?")}</td>` +
+      `<td>${esc(e.rssi != null && e.source !== "remoteid" ? fmtFixed(e.rssi, 1) : "—")}</td>`;
     body.appendChild(tr);
   }
 }
