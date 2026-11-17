@@ -115,6 +115,12 @@ def test_a_legacy_heartbeat_does_not_paint_two_bands_green():
     assert "ok" not in (view["wifi24"], view["wifi5"], view["ble"])
 
 
+def test_band_dot_drops_the_previous_state_class():
+    """A hop from away/off to ok must not leave the old class on the dot."""
+    js = (ROOT / "webapp" / "frontend" / "app.js").read_text()
+    assert 'classList.remove("ok", "down", "away", "off", "offline")' in js
+
+
 def test_5_ghz_stays_off_when_the_radio_is_quiet_and_coverage_is_disabled():
     view = c5_rid.band_status(True, None, NOW, wifi5_configured=False)
     assert view["wifi5"] == "off"

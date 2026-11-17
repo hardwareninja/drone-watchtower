@@ -397,7 +397,7 @@ function setC5Bands(bands) {
     const state = bands && bands[key];
     const shown = state === "ok" || state === "down" || state === "away" || state === "off"
       ? state : "offline";
-    el.classList.remove("ok", "down", "offline");
+    el.classList.remove("ok", "down", "away", "off", "offline");
     el.classList.add(shown);
     const detail = bands && bands.detail && bands.detail[key];
     if (detail) el.title = detail;
