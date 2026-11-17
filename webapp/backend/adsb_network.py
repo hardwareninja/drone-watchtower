@@ -254,7 +254,7 @@ def normalize_track(row: dict, feed_name: str,
         "country": _text(row.get("country")),
         "last_seen": last_seen,
         "source": "net",
-        "feed": feed_name,
+        "feed": textsan.safe_label(feed_name) or "net",
         # Kept so the heuristic can tell a small UAS from a light aircraft.
         "registration": _text(row.get("r")),
         "description": _text(row.get("desc")),

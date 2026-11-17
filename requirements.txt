@@ -4,6 +4,7 @@ scipy>=1.10.0
 matplotlib
 pandas
 pyzmq          # pipeline messaging between decoders and services
+websockets     # scripts/watchtower_enhancer.py live socket (optional)
 pynmea2        # NMEA/GNSS parsing helpers
 cryptography   # AES/CTR experiments for O4 INFP research
 gmssl          # SM2/SM3 for O4 CRYP research (pure-python fallback)

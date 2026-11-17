@@ -35,5 +35,6 @@
     "droneid": "",
     "hop": ""
   },
-  "hackrf_roles": {}
+  "hackrf_roles": {},
+  "c5_wifi5": false
 }

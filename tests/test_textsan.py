@@ -48,3 +48,21 @@ def test_safe_hex_preserves_non_icao_marker():
 
 def test_safe_hex_caps_length():
     assert len(textsan.safe_hex("A" * 40)) == textsan.MAX_HEX_LEN
+
+
+def test_csv_cell_neutralizes_formulas_and_keeps_numbers():
+    assert textsan.csv_cell("=1+1").startswith("'")
+    assert textsan.csv_cell("+cmd").startswith("'")
+    assert textsan.csv_cell("-2+3").startswith("'")
+    assert textsan.csv_cell("@sum").startswith("'")
+    assert textsan.csv_cell(5745.0) == 5745.0
+    assert textsan.csv_cell(None) == ""
+
+
+def test_xml_escape_encodes_markup_and_quotes():
+    text = textsan.xml_escape("""Tom & <Jerry> "q" 'x'""")
+    assert "<Jerry" not in text
+    assert "&amp;" in text
+    assert "&lt;" in text
+    assert "&quot;" in text
+    assert "&apos;" in text

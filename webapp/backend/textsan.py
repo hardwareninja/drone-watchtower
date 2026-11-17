@@ -2,8 +2,10 @@
 
 Every string a receiver decodes is chosen by whoever is on the air: an
 ADS-B callsign, a Remote ID serial, a MAVLink STATUSTEXT. Those strings
-reach the dashboard, so they must be constrained at the trust boundary
-rather than escaped at each render site.
+reach the dashboard, so they are constrained at the trust boundary.
+Exports and the browser still encode what remains for CSV, XML, and HTML,
+because a character that is legal in a callsign can be special in one of
+those formats.
 
 Rule: keep the charset narrow enough that the value cannot carry markup,
 but wide enough that the real value survives. Legitimate ADS-B callsigns
@@ -42,6 +44,69 @@ def safe_label(value, max_len: int = MAX_LABEL_LEN) -> str:
     text = "".join(ch for ch in text if ch.isprintable())
     text = _LABEL_ALLOWED.sub("", text).strip()
     return text[:max_len]
+
+
+# Free-text fields that arrive from a radio, a feed, or another station's
+# broadcast. Numbers stay numbers; these keys are the ones that get rendered
+# and exported.
+RADIO_TEXT_FIELDS = (
+    "session", "source", "marker", "mac", "selfid", "status", "model",
+    "pclass", "description", "operator", "operator_id", "uas_id",
+    "callsign", "flight", "name", "via", "remarks", "registration",
+    "country", "type", "category", "squawk", "feed", "autopilot_name",
+    "statustext", "mode", "type_name", "emergency",
+)
+
+
+def sanitize_text_fields(record: dict, fields=RADIO_TEXT_FIELDS) -> dict:
+    """Copy *record* with each known text field passed through safe_label.
+
+    A missing key is left missing. Numbers and booleans are left alone so a
+    position or a CRC flag cannot be turned into text by mistake.
+    """
+    if not isinstance(record, dict):
+        return {}
+    out = dict(record)
+    for key in fields:
+        if key not in out or out[key] is None:
+            continue
+        if isinstance(out[key], (int, float, bool)):
+            continue
+        out[key] = safe_label(out[key])
+    return out
+
+
+def csv_cell(value):
+    """Make one CSV cell safe for a spreadsheet.
+
+    csv.writer quotes commas and quotes. A cell that starts with ``=``,
+    ``+``, ``-``, ``@``, or a tab/CR is still a formula when Excel opens
+    the file, so those get a leading apostrophe. Numbers pass through.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        text = "'" + text
+    return text
+
+
+def xml_escape(value) -> str:
+    """Escape a string for an XML text node or a double-quoted attribute."""
+    if value is None:
+        return ""
+    text = str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
 
 
 def safe_hex(value) -> str:
