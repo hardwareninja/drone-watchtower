@@ -265,6 +265,18 @@ aside { background: var(--panel); border-right: 1px solid var(--border); display
   border-radius: 8px; padding: 6px 8px;
 }
 #hist-controls.hidden { display: none; }
+#hist-controls .hist-date-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b949e;
+  font-size: 12px;
+}
+#hist-controls .hist-date {
+  width: 9.5rem;
+  font-variant-numeric: tabular-nums;
+}
+#hist-controls .hist-date::placeholder { color: #8b949e; }
 #hist-controls select, #hist-controls input {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 4px 6px; font-size: 12px;

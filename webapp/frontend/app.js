@@ -1269,11 +1269,18 @@ let histEvents = [];
 let histMapOn = false;
 const HIST_PAGE = 500;
 
+function histDateValue(id) {
+  // Accept YYYY-MM-DD only — avoids OS-locale date pickers that show 年/月/日.
+  const el = $(id);
+  const raw = String((el && el.value) || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : "";
+}
+
 function histQuery(paged) {
   const p = new URLSearchParams();
   const src = $("hist-source").value;
-  const from = $("hist-from").value;
-  const to = $("hist-to").value;
+  const from = histDateValue("hist-from");
+  const to = histDateValue("hist-to");
   if (src) p.set("source", src);
   if (from) p.set("frm", from);
   if (to) p.set("to", to);
@@ -1321,25 +1328,32 @@ function histSourceMatch(sources, src) {
     .includes(src);
 }
 
-async function loadHistory() {
-  selectedHistory = null;
-  histOffset = 0;
-  const all = await (await apiFetch("/api/history/sessions?limit=100")).json();
-  const src = $("hist-source").value;
-  historySessions = src
-    ? all.filter((h) => histSourceMatch(h.sources, src))
-    : all;
-  renderHistoryList();
-  if (src) {
-    const evs = await (await apiFetch("/api/history/events?" + histQuery(true))).json();
-    histEvents = evs;
-    renderHistoryTable(evs, `${SRC_LABEL[src] || src} events`);
-    $("hist-more").disabled = evs.length < HIST_PAGE;
-    return;
+function histLocalDay(iso) {
+  // Match the Events table (browser local), not the UTC prefix of the stamp.
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso || "").slice(0, 10);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  } catch (_) {
+    return String(iso || "").slice(0, 10);
   }
-  // "All protocols" used to dump the latest 500 rows — RemoteID flood buried
-  // ELRS/DroneID. Show one latest row per session instead; open a session for detail.
-  const overview = historySessions.map((h) => {
+}
+
+function histSessionInRange(h, from, to) {
+  if (!from && !to) return true;
+  const firstDay = histLocalDay(h.first);
+  const lastDay = histLocalDay(h.last);
+  if (!firstDay || !lastDay) return true;
+  if (from && lastDay < from) return false;
+  if (to && firstDay > to) return false;
+  return true;
+}
+
+function histSessionOverview(sessions) {
+  return sessions.map((h) => {
     const sources = String(h.sources || "").split(",").map((s) => s.trim()).filter(Boolean);
     const markers = String(h.markers || "").split(",").map((s) => s.trim()).filter(Boolean);
     return {
@@ -1354,8 +1368,47 @@ async function loadHistory() {
       crc: true,
     };
   });
+}
+
+function clearHistoryFilters() {
+  $("hist-source").value = "";
+  $("hist-from").value = "";
+  $("hist-to").value = "";
+  selectedHistory = null;
+  loadHistory();
+}
+
+async function loadHistory() {
+  selectedHistory = null;
+  histOffset = 0;
+  const all = await (await apiFetch("/api/history/sessions?limit=100")).json();
+  const src = $("hist-source").value;
+  const from = histDateValue("hist-from");
+  const to = histDateValue("hist-to");
+  historySessions = all
+    .filter((h) => histSourceMatch(h.sources, src))
+    .filter((h) => histSessionInRange(h, from, to));
+  renderHistoryList();
+
+  // Protocol selected → raw events for that protocol (optional date bounds).
+  // All protocols → always one row per session (dates only narrow the list).
+  // Never dump raw "all events" — RemoteID floods and there is no way back.
+  if (src) {
+    const evs = await (await apiFetch("/api/history/events?" + histQuery(true))).json();
+    histEvents = evs;
+    const bits = [SRC_LABEL[src] || src];
+    if (from || to) bits.push(`${from || "…"} → ${to || "…"}`);
+    renderHistoryTable(evs, bits.join(" · ") + " events");
+    $("hist-more").disabled = evs.length < HIST_PAGE;
+    return;
+  }
+
+  const overview = histSessionOverview(historySessions);
   histEvents = overview;
-  renderHistoryTable(overview, "Sessions (latest per identifier)");
+  const title = (from || to)
+    ? `Sessions ${from || "…"} → ${to || "…"} (latest per identifier)`
+    : "Sessions (latest per identifier)";
+  renderHistoryTable(overview, title);
   $("hist-more").disabled = true;
 }
 
@@ -1415,8 +1468,8 @@ async function showHistoryDetail(h) {
   const p = new URLSearchParams({ session: h.session, limit: "500" });
   const src = $("hist-source").value;
   if (src) p.set("source", src);
-  const from = $("hist-from").value;
-  const to = $("hist-to").value;
+  const from = histDateValue("hist-from");
+  const to = histDateValue("hist-to");
   if (from) p.set("frm", from);
   if (to) p.set("to", to);
   const evs = await (await apiFetch(`/api/history/events?${p}`)).json();
@@ -1584,6 +1637,13 @@ function init() {
   for (const id of ["hist-source", "hist-from", "hist-to"]) {
     $(id).addEventListener("change", loadHistory);
   }
+  for (const id of ["hist-from", "hist-to"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); loadHistory(); }
+    });
+  }
+  const histClear = $("hist-clear");
+  if (histClear) histClear.onclick = clearHistoryFilters;
   setInterval(expireLive, 1000);
   pullStatus();
   setInterval(pullStatus, 1000);  // keep RF hop phase visible even between WS pushes

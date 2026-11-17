@@ -30,8 +30,9 @@ if [ -n "$KEEP_CFG" ]; then
   rm -f "$KEEP_CFG"
   echo "[*] Preserved existing backend/config.json"
 fi
-for req in app.py elrs_demod.py mavlink_demod.py c5_rid_bridge.py usb_locate.py \
-           adsb_network.py adsb_classify.py zc_gate.py; do
+for req in app.py elrs_demod.py mavlink_demod.py c5_rid_bridge.py c5_rid.py \
+           usb_locate.py adsb_network.py adsb_classify.py aircraft_registry.py \
+           track_export.py textsan.py zc_gate.py; do
   if [ ! -f "$DEST/backend/$req" ]; then
     echo "FATAL: missing $DEST/backend/$req — refuse to restart a half deploy"
     exit 1
@@ -91,19 +92,31 @@ EOF
 
 # The token is read from the environment by the service, not from a file
 # the webapp user can read. The file always exists: the unit points at
-# it, and an empty one means "no token required".
+# it. Preserve HACKRF_* (and any other operator env) across deploys —
+# rewriting the file to empty used to unassign both radios.
 sudo mkdir -p /etc/watchtower
-if [[ -n "$TOKEN" ]]; then
-  printf 'WATCHTOWER_TOKEN=%s\n' "$TOKEN" | sudo tee /etc/watchtower/env >/dev/null
-else
-  : | sudo tee /etc/watchtower/env >/dev/null
+ENV_FILE=/etc/watchtower/env
+KEEP_ENV=$(mktemp)
+if [[ -f "$ENV_FILE" ]]; then
+  grep -v '^WATCHTOWER_TOKEN=' "$ENV_FILE" > "$KEEP_ENV" || true
 fi
-sudo chmod 640 /etc/watchtower/env
-sudo chown root:drone /etc/watchtower/env
+{
+  cat "$KEEP_ENV"
+  if [[ -n "$TOKEN" ]]; then
+    printf 'WATCHTOWER_TOKEN=%s\n' "$TOKEN"
+  fi
+} | sudo tee "$ENV_FILE" >/dev/null
+rm -f "$KEEP_ENV"
+sudo chmod 640 "$ENV_FILE"
+sudo chown root:drone "$ENV_FILE"
 
 systemctl daemon-reload
 systemctl enable watchtower-web.service >/dev/null 2>&1 || true
 systemctl restart watchtower-web.service
+# C5 bridge loads c5_rid_bridge.py from the same tree — bounce it too.
+if systemctl list-unit-files watchtower-c5-rid.service >/dev/null 2>&1; then
+  systemctl restart watchtower-c5-rid.service || true
+fi
 sleep 2
 systemctl --no-pager status watchtower-web.service | head -4
 curl -s -o /dev/null -w "[*] Webapp HTTP status: %{http_code}\n" http://localhost:8080/
